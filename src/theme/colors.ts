@@ -1,0 +1,18 @@
+export const colors = {
+  navy950: '#050E1A',
+  navy900: '#0A192E',
+  navy800: '#0E213C',
+  navy700: '#163357',
+  navy600: '#224B77',
+  white: '#FFFFFF',
+  muted: '#9CB2CC',
+  blue: '#3C8ED0',
+  blueDark: '#2A6FA7',
+  neon: '#39FF14',
+  black: '#000000',
+  glowBlue: 'rgba(60, 142, 208, 0.40)',
+  glowNeon: 'rgba(57, 255, 20, 0.30)',
+  danger: '#FF6685',
+  border: '#23415E',
+  overlay: 'rgba(6, 14, 26, 0.74)',
+} as const;

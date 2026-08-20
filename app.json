@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "MacroChat",
+    "slug": "macrochat",
+    "version": "1.0.0",
+    "icon": "./assets/images/macrostellar-logo.png",
+    "orientation": "portrait",
+    "scheme": "macrochat",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.macrochat.app"
+    },
+    "android": {
+      "package": "com.macrochat.app",
+      "versionCode": 1,
+      "softwareKeyboardLayoutMode": "resize",
+      "adaptiveIcon": {
+        "backgroundColor": "#07111F"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "MacroChat uses the camera to capture photos and videos.",
+          "microphonePermission": "MacroChat uses the microphone when recording video."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
