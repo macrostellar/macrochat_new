@@ -183,13 +183,14 @@ CREATE POLICY macrochat_session_keys_user_policy
   USING (user_id = auth.uid()) 
   WITH CHECK (user_id = auth.uid());
 
--- X3DH bundles: anyone can read active bundles, user can manage their own
+-- X3DH bundles: anyone can read active bundles
 CREATE POLICY macrochat_x3dh_public_read_policy 
   ON public.macrochat_x3dh_key_bundles FOR SELECT 
   USING (is_active = TRUE);
 
+-- User can manage their own X3DH bundles (insert, update, delete)
 CREATE POLICY macrochat_x3dh_user_manage_policy 
-  ON public.macrochat_x3dh_key_bundles FOR INSERT,UPDATE,DELETE 
+  ON public.macrochat_x3dh_key_bundles FOR ALL 
   USING (user_id = auth.uid()) 
   WITH CHECK (user_id = auth.uid());
 

@@ -11,7 +11,8 @@ import { useApp } from '@/context/AppContext';
 import { getAccountRecoveryState } from '@/lib/supabase';
 import { colors } from '@/theme/colors';
 
-const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/privacy' }[] = [
+const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/privacy' | '/(tabs)/settings-e2ee' }[] = [
+  { icon: 'lock-closed-outline', title: 'Encryption', detail: 'View & manage encryption keys', route: '/(tabs)/settings-e2ee' },
   { icon: 'shield-checkmark-outline', title: 'Privacy', detail: 'Typing activity, calls and identity protection', route: '/security/privacy' },
   { icon: 'notifications-outline', title: 'Notifications', detail: 'Messages, groups and calls' },
   { icon: 'color-palette-outline', title: 'Appearance', detail: 'Dark navy theme' },

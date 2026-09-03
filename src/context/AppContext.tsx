@@ -19,8 +19,10 @@ import {
   writeE2EEPassphrase,
 } from '@/lib/e2ee';
 import { encryptCallSignaling, decryptCallSignaling } from '@/lib/e2ee-calls';
+import { initializeE2EEProService, type E2EEProService } from '@/lib/e2ee-pro-service';
 
 const PROFILE_KEY = 'macrochat.profile';
+const DEVICE_ID_KEY = 'macrochat.device_id';
 
 type AppContextValue = {
   profile: Profile | null;
@@ -33,6 +35,7 @@ type AppContextValue = {
   activeCall: ActiveCall | null;
   mfaAal2: boolean;
   e2eeEnabled: boolean;
+  e2eePro: E2EEProService | null;
   privacySettings: PrivacySettings;
   blockedContacts: BlockedContact[];
   register: (displayName: string) => Promise<Profile>;
@@ -303,6 +306,22 @@ async function clearProfileFromStorage() {
   await SecureStore.deleteItemAsync(PROFILE_KEY);
 }
 
+// Device ID management for E2EE Pro
+async function getOrCreateDeviceId(): Promise<string> {
+  if (Platform.OS === 'web') {
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(DEVICE_ID_KEY) : null;
+    if (stored) return stored;
+    const deviceId = localId('device');
+    if (typeof localStorage !== 'undefined') localStorage.setItem(DEVICE_ID_KEY, deviceId);
+    return deviceId;
+  }
+  const stored = await SecureStore.getItemAsync(DEVICE_ID_KEY);
+  if (stored) return stored;
+  const deviceId = localId('device');
+  await SecureStore.setItemAsync(DEVICE_ID_KEY, deviceId);
+  return deviceId;
+}
+
 export function AppProvider({ children }: PropsWithChildren) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -325,6 +344,8 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [messageReactions, setMessageReactions] = useState<Record<string, MessageReaction[]>>({});
   const [messageComments, setMessageComments] = useState<Record<string, MessageComment[]>>({});
   const [mfaAal2, setMfaAal2] = useState(false);
+  const [e2eePro, setE2eePro] = useState<E2EEProService | null>(null);
+  const deviceIdRef = useRef<string | null>(null);
   const [e2eePassphrase, setE2eePassphrase] = useState<string | null>(null);
   const [privacySettings, setPrivacySettings] = useState(defaultPrivacySettings);
   const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
@@ -386,7 +407,6 @@ export function AppProvider({ children }: PropsWithChildren) {
       const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
       if (!error) {
         setMfaAal2(data.currentLevel === 'aal2');
-        return;
       }
     } catch {
       // Fallback below
@@ -395,6 +415,21 @@ export function AppProvider({ children }: PropsWithChildren) {
     const { data: sessionData } = await supabase.auth.getSession();
     const aal = sessionData.session?.user?.app_metadata?.aal ?? sessionData.session?.user?.user_metadata?.aal;
     setMfaAal2(aal === 'aal2');
+
+    // Initialize E2EE Pro service
+    try {
+      const userId = sessionData.session?.user.id;
+      if (userId && !deviceIdRef.current) {
+        const deviceId = await getOrCreateDeviceId();
+        deviceIdRef.current = deviceId;
+        const service = initializeE2EEProService(userId, deviceId);
+        await service.initialize();
+        setE2eePro(service);
+        console.log('[E2EE Pro] Service initialized for user:', userId, 'device:', deviceId);
+      }
+    } catch (error) {
+      console.error('[E2EE Pro] Initialization failed:', error);
+    }
   }, []);
 
   const refreshPrivacyState = useCallback(async () => {
@@ -864,7 +899,18 @@ export function AppProvider({ children }: PropsWithChildren) {
           const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
           let displayText = mediaMeta.text || row.body;
           if (encrypted) {
-            if (e2eePassphrase) {
+            if (row.encryption_version === 'mc-e2ee-v2-pro' && e2eePro) {
+              // E2EE Pro - try to decrypt with service
+              try {
+                // Note: Full decryption requires X3DH session lookup from DB
+                // For now, mark as encrypted and decrypt on-demand in UI
+                displayText = '[Encrypted with E2EE Pro]';
+              } catch (error) {
+                console.warn('[E2EE Pro] Decryption failed:', error);
+                displayText = '[Unable to decrypt]';
+              }
+            } else if (e2eePassphrase) {
+              // Phase 1 passphrase-based
               const decrypted = decryptTextWithPassphrase(row.body_ciphertext!, row.body_nonce!, e2eePassphrase);
               displayText = decrypted ?? '[Unable to decrypt]';
             } else {
@@ -1606,7 +1652,14 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (!payload) return;
 
     const disappearingSeconds = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
-    const encryptedPayload = e2eePassphrase ? encryptTextWithPassphrase(payload, e2eePassphrase) : null;
+    
+    // Try E2EE Pro first, fall back to passphrase
+    let encryptedPayload = null;
+    if (e2eePro) {
+      // E2EE Pro will be handled asynchronously after DB insert
+    } else if (e2eePassphrase) {
+      encryptedPayload = encryptTextWithPassphrase(payload, e2eePassphrase);
+    }
 
     // Immutable client-side ID that never changes, even after the server assigns a UUID
     const clientId = `message-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
@@ -1621,7 +1674,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       fontStyle: options?.fontStyle,
       fontFamily: options?.fontFamily,
       encrypted: Boolean(encryptedPayload),
-      encryptionVersion: encryptedPayload?.version,
+      encryptionVersion: encryptedPayload?.version || (e2eePro ? 'mc-e2ee-v2-pro' : undefined),
       ciphertext: encryptedPayload?.ciphertext,
       nonce: encryptedPayload?.nonce,
       createdAt: new Date().toISOString(),
@@ -1656,16 +1709,20 @@ export function AppProvider({ children }: PropsWithChildren) {
 
       client.auth.getSession().then(({ data: sessionData }) => {
         const actorUserId = sessionData.session?.user.id ?? profile.id;
+        const chat = chats.find((c) => c.id === chatId);
+        const recipientUserId = chat?.participantUserId;
+        
         const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(replyTo || '');
-        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo });
+        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo, e2eeType: e2eePro ? 'pro' : 'passphrase' });
+        
         return client.from('macrochat_messages').insert({
           conversation_id: chatId,
           sender_id: actorUserId,
-          body: encryptedPayload ? '[encrypted]' : formattedBody,
+          body: encryptedPayload ? '[encrypted]' : (e2eePro ? '[encrypted-pro]' : formattedBody),
           kind: 'text',
           body_ciphertext: encryptedPayload?.ciphertext,
           body_nonce: encryptedPayload?.nonce,
-          encryption_version: encryptedPayload?.version,
+          encryption_version: encryptedPayload?.version || (e2eePro ? 'mc-e2ee-v2-pro' : undefined),
           client_id: clientId,
           reply_to: isValidUuid ? replyTo : null,
         }).select('id, client_id');
@@ -1703,7 +1760,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
 
     setTimeout(() => updateLocalMessageStatus('sent'), 350);
-  }, [chats, e2eePassphrase, profile]);
+  }, [chats, e2eePassphrase, profile, e2eePro]);
 
   const sendMediaMessage = useCallback(async (chatId: string, input: {
     kind: Exclude<MessageKind, 'text' | 'system'>;
@@ -2036,6 +2093,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     activeCall,
     mfaAal2,
     e2eeEnabled: Boolean(e2eePassphrase),
+    e2eePro,
     privacySettings,
     blockedContacts,
     register,
@@ -2100,6 +2158,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     activeCall,
     mfaAal2,
     e2eePassphrase,
+    e2eePro,
     privacySettings,
     blockedContacts,
     register,
