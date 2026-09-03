@@ -1281,8 +1281,16 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (pc.connectionState === 'connected') {
         setMediaConnected(true);
         setCallStartedAt((current) => current ?? Date.now());
-      } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        console.log('[WebRTC] Connection established');
+      } else if (pc.connectionState === 'disconnected') {
+        console.warn('[WebRTC] Connection disconnected, attempting ICE restart...');
         setMediaConnected(false);
+        // Trigger ICE restart to recover from temporary disconnects
+        pc.restartIce();
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        console.error('[WebRTC] Connection failed or closed');
+        setMediaConnected(false);
+        teardownCall();
       }
     };
 

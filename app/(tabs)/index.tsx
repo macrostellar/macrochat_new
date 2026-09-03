@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { FlatList, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { FlatList, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View, Alert } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/Avatar';
@@ -18,6 +18,24 @@ export default function ChatsScreen() {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => chats.filter((chat) => `${chat.name} ${chat.macroId}`.toLowerCase().includes(query.toLowerCase())), [chats, query]);
 
+  const copyToClipboard = async () => {
+    if (!profile?.macroId) return;
+    try {
+      if (Platform.OS === 'web') {
+        await navigator.clipboard.writeText(profile.macroId);
+      } else {
+        // React Native
+        require('react-native').Share.share({
+          message: profile.macroId,
+          title: 'Macro ID',
+        });
+      }
+      Alert.alert('Copied', `${profile.macroId} copied to clipboard`);
+    } catch (err) {
+      Alert.alert('Error', 'Could not copy to clipboard');
+    }
+  };
+
   if (Platform.OS === 'web' && width >= 820) return <WebMessenger />;
 
   return (
@@ -32,7 +50,7 @@ export default function ChatsScreen() {
           <Pressable accessibilityLabel="Start a new chat" style={[styles.iconButton, styles.newButton]} onPress={() => router.push('/new-chat')}><Ionicons name="add" size={22} color={colors.black} /></Pressable>
         </View>
       </View>
-      <View style={styles.identityCard}><View style={styles.liveDot} /><Text style={styles.identityText}>Your ID: {profile?.macroId}</Text><Ionicons name="copy-outline" color={colors.blue} size={15} /></View>
+      <View style={styles.identityCard}><View style={styles.liveDot} /><Text style={styles.identityText}>Your ID: {profile?.macroId}</Text><Pressable onPress={copyToClipboard}><Ionicons name="copy-outline" color={colors.blue} size={15} /></Pressable></View>
       <View style={styles.securityRow}>
         <Pressable style={[styles.securityChip, mfaAal2 ? styles.securityChipOn : styles.securityChipOff]} onPress={() => router.push('/security/mfa')}>
           <Ionicons name={mfaAal2 ? 'shield-checkmark' : 'shield-outline'} size={12} color={mfaAal2 ? colors.neon : colors.muted} />
@@ -52,12 +70,13 @@ export default function ChatsScreen() {
         ListEmptyComponent={<Text style={styles.empty}>No conversations found.</Text>}
         renderItem={({ item }) => {
           const last = item.messages[item.messages.length - 1];
+          const isRead = last?.readAt !== null && last?.readAt !== undefined;
           return (
             <Pressable style={({ pressed }) => [styles.chat, pressed && { backgroundColor: colors.navy800 }]} onPress={() => router.push({ pathname: '/chat/[id]', params: { id: item.id } })}>
               <Avatar name={item.name} color={item.avatarColor} online={item.online} />
               <View style={styles.chatBody}>
                 <View style={styles.chatTop}><Text style={styles.chatName} numberOfLines={1}>{item.name}</Text><Text style={[styles.time, item.unread > 0 && { color: colors.neon }]}>{last ? timeLabel(last.createdAt) : 'New'}</Text></View>
-                <View style={styles.chatBottom}><Text style={styles.preview} numberOfLines={1}>{last?.senderId === 'me' ? 'You: ' : ''}{last?.text ?? 'Start a private conversation'}</Text>{item.unread > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{item.unread}</Text></View>}</View>
+                <View style={styles.chatBottom}><Text style={styles.preview} numberOfLines={1}>{last?.senderId === 'me' ? 'You: ' : ''}{last?.text ?? 'Start a private conversation'}</Text><View style={styles.readReceipts}>{last?.senderId === 'me' && <Text style={[styles.tick, isRead ? { color: colors.neon } : { color: colors.blue }]}>✓✓</Text>}</View>{item.unread > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{item.unread}</Text></View>}</View>
               </View>
             </Pressable>
           );
@@ -86,5 +105,5 @@ const styles = StyleSheet.create({
   securityChipTextOff: { color: colors.muted },
   search: { marginHorizontal: 20, marginTop: 6, marginBottom: 12, height: 48, borderRadius: 15, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 9 }, searchInput: { color: colors.white, flex: 1, fontSize: 15 },
   filterRow: { flexDirection: 'row', paddingHorizontal: 20, gap: 9, marginBottom: 10 }, filter: { borderWidth: 1, borderColor: colors.border, borderRadius: 20, paddingVertical: 7, paddingHorizontal: 15 }, filterActive: { backgroundColor: '#173852', borderColor: colors.blue }, filterText: { color: colors.muted, fontWeight: '700', fontSize: 12 }, filterTextActive: { color: colors.blue },
-  chat: { flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 13, gap: 13 }, chatBody: { flex: 1, justifyContent: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, paddingBottom: 13 }, chatTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 }, chatName: { color: colors.white, fontSize: 16, fontWeight: '800', flex: 1 }, time: { color: colors.muted, fontSize: 11 }, chatBottom: { flexDirection: 'row', alignItems: 'center', marginTop: 5 }, preview: { color: colors.muted, fontSize: 14, flex: 1 }, badge: { minWidth: 20, height: 20, borderRadius: 10, paddingHorizontal: 5, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' }, badgeText: { color: colors.navy950, fontSize: 11, fontWeight: '900' }, empty: { color: colors.muted, textAlign: 'center', marginTop: 60 },
+  chat: { flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 13, gap: 13 }, chatBody: { flex: 1, justifyContent: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, paddingBottom: 13 }, chatTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 }, chatName: { color: colors.white, fontSize: 16, fontWeight: '800', flex: 1 }, time: { color: colors.muted, fontSize: 11 }, chatBottom: { flexDirection: 'row', alignItems: 'center', marginTop: 5 }, preview: { color: colors.muted, fontSize: 14, flex: 1 }, readReceipts: { flexDirection: 'row', marginLeft: 6 }, tick: { fontSize: 10, fontWeight: '900', marginRight: 4 }, badge: { minWidth: 20, height: 20, borderRadius: 10, paddingHorizontal: 5, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' }, badgeText: { color: colors.navy950, fontSize: 11, fontWeight: '900' }, empty: { color: colors.muted, textAlign: 'center', marginTop: 60 },
 });
