@@ -382,27 +382,28 @@ export class E2EEProService {
   /**
    * Encrypt a message for a peer (auto-selects peer's primary device).
    * Convenience method that fetches peer's device ID automatically.
+   * Queries the public X3DH key bundle table (has public read RLS policy).
    */
   async encryptMessageForPeerAuto(
     plaintext: string,
     peerUserId: string
   ): Promise<EncryptedMessage | null> {
     try {
-      // Fetch peer's active devices
-      const { data: devices, error } = await supabase
-        .from('macrochat_devices')
-        .select('id, device_id')
+      // Fetch peer's active X3DH key bundle (public read allowed by RLS)
+      const { data: bundles, error } = await supabase
+        .from('macrochat_x3dh_key_bundles')
+        .select('device_id')
         .eq('user_id', peerUserId)
         .eq('is_active', true)
-        .order('created_at', { ascending: false })
+        .order('published_at', { ascending: false })
         .limit(1);
 
-      if (error || !devices || devices.length === 0) {
-        console.warn('No active devices found for peer:', peerUserId);
+      if (error || !bundles || bundles.length === 0) {
+        console.warn('No active X3DH key bundles found for peer:', peerUserId);
         return null;
       }
 
-      const peerDeviceId = devices[0].device_id;
+      const peerDeviceId = bundles[0].device_id;
       return await this.encryptMessageForPeer(plaintext, peerUserId, peerDeviceId);
     } catch (error) {
       console.error('Failed to encrypt message for peer:', error);
