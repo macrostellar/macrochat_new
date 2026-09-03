@@ -1015,9 +1015,22 @@ export function AppProvider({ children }: PropsWithChildren) {
     const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
     let displayText = mediaMeta.text || row.body;
     if (encrypted) {
-      displayText = e2eePassphrase
-        ? (decryptTextWithPassphrase(row.body_ciphertext!, row.body_nonce!, e2eePassphrase) ?? '[Unable to decrypt]')
-        : '[Encrypted message]';
+      if (row.encryption_version === 'mc-e2ee-v2-pro' && e2eePro) {
+        // E2EE Pro - try to decrypt with service
+        try {
+          // Note: Full decryption requires X3DH session lookup from DB
+          // For now, mark as encrypted and decrypt on-demand in UI
+          displayText = '[Encrypted with E2EE Pro]';
+        } catch (error) {
+          console.warn('[E2EE Pro] Decryption failed:', error);
+          displayText = '[Unable to decrypt]';
+        }
+      } else if (e2eePassphrase) {
+        // Phase 1 passphrase-based
+        displayText = decryptTextWithPassphrase(row.body_ciphertext!, row.body_nonce!, e2eePassphrase) ?? '[Unable to decrypt]';
+      } else {
+        displayText = '[Encrypted message]';
+      }
     } else if (row.kind !== 'text' && row.kind !== 'system' && row.kind !== 'call') {
       displayText = mediaMeta.name || mediaMeta.text || row.body || row.kind;
     }
@@ -1068,7 +1081,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         messages: [...chat.messages, incoming],
       };
     }));
-  }, [e2eePassphrase, profile]);
+  }, [e2eePro, e2eePassphrase, profile]);
 
   useEffect(() => {
     readProfileFromStorage()
