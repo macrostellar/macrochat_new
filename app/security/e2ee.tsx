@@ -48,17 +48,18 @@ export default function E2EEScreen() {
         {!(Platform.OS === 'web' && width >= 820) && (
         <View style={styles.headerRow}>
           <Pressable style={styles.back} onPress={() => router.back()}><Ionicons name="chevron-back" size={23} color={colors.white} /></Pressable>
-          <Text style={styles.title}>E2EE Phase 1</Text>
+          <Text style={styles.title}>E2EE Pro</Text>
         </View>
         )}
 
         <View style={styles.card}>
           <Text style={styles.caption}>Status</Text>
-          <Text style={[styles.state, { color: e2eeEnabled ? colors.neon : colors.danger }]}>{e2eeEnabled ? 'Enabled' : 'Disabled'}</Text>
-          <Text style={styles.note}>Phase 1 encrypts message payloads client-side with a passphrase-derived key.</Text>
+          <Text style={[styles.state, { color: colors.neon }]}>Enabled (E2EE Pro - Automatic)</Text>
+          <Text style={styles.note}>Messages protected with Signal Protocol X3DH + Double Ratchet. Per-device encryption. Forward secrecy. Multi-device support.</Text>
         </View>
 
-        <Text style={styles.section}>Passphrase</Text>
+        <Text style={styles.section}>Legacy Passphrase Encryption (Optional)</Text>
+        <Text style={styles.legacyNote}>E2EE Pro is active automatically. The passphrase below is for legacy Phase 1 encryption - it's optional and no longer needed.</Text>
         {notice && <View style={[styles.notice, { borderColor: notice.error ? colors.danger : colors.neon }]}><Ionicons name={notice.error ? 'alert-circle-outline' : 'checkmark-circle-outline'} size={20} color={notice.error ? colors.danger : colors.neon} /><Text style={styles.noticeText}>{notice.text}</Text></View>}
         <TextInput
           value={passphrase}
@@ -76,7 +77,7 @@ export default function E2EEScreen() {
   );
 
   if (Platform.OS === 'web' && width >= 820) {
-    return <WebSettingsShell activeId="e2ee" title="Message encryption" subtitle="Manage this device's message encryption passphrase">{content}</WebSettingsShell>;
+    return <WebSettingsShell activeId="e2ee" title="Message encryption" subtitle="Production-grade E2EE with Signal Protocol (automatic)">{content}</WebSettingsShell>;
   }
 
   return <Screen>{content}</Screen>;
@@ -93,6 +94,7 @@ const styles = StyleSheet.create({
   state: { marginTop: 8, fontSize: 22, fontWeight: '900' },
   note: { color: colors.muted, marginTop: 6, fontSize: 12 },
   section: { color: colors.blue, fontWeight: '800', fontSize: 12, letterSpacing: 1.2, marginBottom: 8 },
+  legacyNote: { color: colors.muted, fontSize: 12, marginBottom: 12, lineHeight: 18 },
   input: { height: 52, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, color: colors.white, paddingHorizontal: 14, fontSize: 15 },
   notice: { borderWidth: 1, padding: 12, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 8 },
   noticeText: { color: colors.white, fontSize: 12, lineHeight: 18, flex: 1 },
