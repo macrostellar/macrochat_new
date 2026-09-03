@@ -186,7 +186,8 @@ export function computeX3DHInitiator(input: X3DHInitiatorInput): string {
 
   // X3DH: DH1 + DH2 + DH3 + DH4
   // Convert Ed25519 identity keys to X25519 for DH
-  const myIdentityX25519Secret = nacl.sign.keyPair.fromSecretKey(myIdentitySecret).secretKey;
+  // Ed25519 secret key is 64 bytes, but X25519 only uses the first 32 bytes (seed)
+  const myIdentityX25519Secret = nacl.sign.keyPair.fromSecretKey(myIdentitySecret).secretKey.slice(0, 32);
   // For Ed25519 public -> X25519, use nacl crypto_sign_sk_to_seed equivalent
   const myIdentityX25519Pub = nacl.box.keyPair.fromSecretKey(myIdentityX25519Secret).publicKey;
   const peerIdentityX25519Pub = convertEd25519PublicToX25519(peerIdentityPublic);
@@ -226,7 +227,8 @@ export function computeX3DHResponder(input: X3DHResponderInput): string {
   const initiatorEphemeralPub = decodeBase64(initiatorEphemeralPublicKey);
 
   // Convert identity keys
-  const myIdentityX25519Secret = nacl.sign.keyPair.fromSecretKey(myIdentitySecret).secretKey;
+  // Ed25519 secret key is 64 bytes, but X25519 only uses the first 32 bytes (seed)
+  const myIdentityX25519Secret = nacl.sign.keyPair.fromSecretKey(myIdentitySecret).secretKey.slice(0, 32);
   const myIdentityX25519Pub = nacl.box.keyPair.fromSecretKey(myIdentityX25519Secret).publicKey;
   const initiatorIdentityX25519Pub = convertEd25519PublicToX25519(initiatorIdentityPub);
 

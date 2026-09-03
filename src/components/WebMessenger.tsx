@@ -19,8 +19,10 @@ function chatTime(iso: string) {
 function MessageTicks({ status }: { status: Message['status'] }) {
   if (status === 'sending') return <Text style={{ color: colors.muted, fontSize: 10 }}>◷</Text>;
   if (status === 'failed') return <Text style={{ color: colors.danger, fontSize: 10, fontWeight: '900' }}>!</Text>;
+  if (status === 'read') return <Ionicons name="checkmark-done" size={16} color={colors.blue} />;
+  if (status === 'delivered') return <Ionicons name="checkmark-done" size={16} color={colors.neon} />;
   if (status === 'sent') return <Ionicons name="checkmark" size={15} color={colors.muted} />;
-  return <Ionicons name="checkmark-done" size={16} color={colors.neon} />;
+  return <Ionicons name="checkmark" size={15} color={colors.muted} />;
 }
 
 const EMOJI_LIST = ['👍', '❤️', '😂', '😮', '😢', '😡', '🔥', '✨', '🎉', '🚀', '👋', '🙏', '💯', '💩', '📌', '⚡', '🌟', '🍕', '☕', '🎈'];

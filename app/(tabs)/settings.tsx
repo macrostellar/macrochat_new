@@ -98,13 +98,15 @@ export default function SettingsScreen() {
 
         <View style={styles.avatarPicker}>
           <Text style={styles.avatarTitle}>Choose a profile photo</Text>
-          <View style={styles.defaultAvatarRow}>
-            {DEFAULT_PROFILE_AVATARS.slice(0, 6).map((url) => (
-              <Pressable key={url} onPress={async () => { await updateProfilePicture(url); }}>
-                <Avatar name={profile.displayName} color={profile.avatarColor} size={42} imageUrl={url} />
-              </Pressable>
-            ))}
-          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.avatarScrollContainer}>
+            <View style={styles.defaultAvatarRow}>
+              {DEFAULT_PROFILE_AVATARS.map((url) => (
+                <Pressable key={url} onPress={async () => { await updateProfilePicture(url); }}>
+                  <Avatar name={profile.displayName} color={profile.avatarColor} size={40} imageUrl={url} />
+                </Pressable>
+              ))}
+            </View>
+          </ScrollView>
           <Pressable style={styles.uploadButton} onPress={pickProfilePicture}>
             <Ionicons name="cloud-upload-outline" size={16} color={colors.white} />
             <Text style={styles.uploadText}>Upload custom photo</Text>
@@ -218,7 +220,8 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   avatarTitle: { color: colors.white, fontWeight: '800', fontSize: 14, marginBottom: 10 },
-  defaultAvatarRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  defaultAvatarRow: { flexDirection: 'row', gap: 12, paddingVertical: 6 },
+  avatarScrollContainer: { marginHorizontal: -14 },
   uploadButton: {
     marginTop: 12,
     flexDirection: 'row',

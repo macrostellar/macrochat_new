@@ -2,16 +2,16 @@ import { Image, Text, View } from 'react-native';
 import { colors } from '@/theme/colors';
 
 export const DEFAULT_PROFILE_AVATARS = [
-  'https://images.unsplash.com/photo-1517849845537-4d257902454a?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1521119989659-a83eee488004?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=800&q=80',
-  'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?auto=format&fit=crop&w=800&q=80',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user1.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user2.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user3.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user4.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user5.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user6.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user7.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user8.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user9.jpg',
+  'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media/user10.jpg',
 ];
 
 export function Avatar({ name, color, size = 48, online = false, imageUrl }: { name: string; color: string; size?: number; online?: boolean; imageUrl?: string }) {

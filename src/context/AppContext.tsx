@@ -173,6 +173,7 @@ function parseMediaBody(body: string | null | undefined): {
   durationMs?: number;
   mimeType?: string;
   dataUrl?: string;
+  signedUrl?: string;
   textColor?: string;
   fontStyle?: 'normal' | 'italic';
   fontFamily?: string;
@@ -188,6 +189,7 @@ function parseMediaBody(body: string | null | undefined): {
         durationMs: typeof parsed.durationMs === 'number' ? parsed.durationMs : undefined,
         mimeType: typeof parsed.mimeType === 'string' ? parsed.mimeType : undefined,
         dataUrl: typeof parsed.dataUrl === 'string' ? parsed.dataUrl : undefined,
+        signedUrl: typeof parsed.signedUrl === 'string' ? parsed.signedUrl : undefined,
         textColor: typeof parsed.textColor === 'string' ? parsed.textColor : undefined,
         fontStyle: parsed.fontStyle === 'normal' || parsed.fontStyle === 'italic' ? parsed.fontStyle : undefined,
         fontFamily: typeof parsed.fontFamily === 'string' ? parsed.fontFamily : undefined,
@@ -928,7 +930,7 @@ export function AppProvider({ children }: PropsWithChildren) {
             text: displayText,
             kind: row.kind,
             mediaPath: row.media_path ?? undefined,
-            mediaUrl: mediaMeta.dataUrl || (row.media_path ? (row.media_path.startsWith('data:') ? row.media_path : signedByPath.get(row.media_path)) : undefined),
+            mediaUrl: mediaMeta.signedUrl || mediaMeta.dataUrl || (row.media_path ? (row.media_path.startsWith('data:') ? row.media_path : signedByPath.get(row.media_path)) : undefined),
             fileName: mediaMeta.name,
             mimeType: mediaMeta.mimeType,
             durationMs: mediaMeta.durationMs,
@@ -1035,7 +1037,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       displayText = mediaMeta.name || mediaMeta.text || row.body || row.kind;
     }
 
-    const mediaUrl = mediaMeta.dataUrl || (row.media_path && row.media_path.startsWith('data:') ? row.media_path : undefined);
+    const mediaUrl = mediaMeta.signedUrl || mediaMeta.dataUrl || (row.media_path && row.media_path.startsWith('data:') ? row.media_path : undefined);
 
     const incoming: Message = {
       id: row.id,
@@ -1071,7 +1073,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         return {
           ...chat,
           messages: chat.messages.map((m) => m === existing
-            ? { ...m, ...incoming, clientId: incoming.clientId ?? m.clientId, status: 'sent' }
+            ? { ...m, ...incoming, clientId: incoming.clientId ?? m.clientId, status: 'sent', mediaUrl: incoming.mediaUrl || m.mediaUrl }
             : m),
         };
       }
@@ -1869,11 +1871,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           contentType,
           upsert: false,
         });
-        if (!uploadRes.error) {
+        if (uploadRes.error) {
+          console.error('[sendMediaMessage] Storage upload failed:', uploadRes.error);
+        } else {
           const signedRes = await supabase.storage.from('macrochat-media').createSignedUrl(candidatePath, 60 * 60 * 24);
           if (signedRes.data?.signedUrl) {
             path = candidatePath;
             signedUrl = signedRes.data.signedUrl;
+            console.log('[sendMediaMessage] Media uploaded and signed:', candidatePath);
+          } else if (signedRes.error) {
+            console.error('[sendMediaMessage] Failed to create signed URL:', signedRes.error);
           }
         }
       } catch (storageErr) {
@@ -1884,6 +1891,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         name: input.fileName || input.kind,
         durationMs: input.durationMs,
         mimeType: contentType,
+        ...(signedUrl ? { signedUrl } : {}),
       });
 
       const finalMediaPath = path || portableUri;
