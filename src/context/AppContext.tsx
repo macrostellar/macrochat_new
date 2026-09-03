@@ -1742,21 +1742,26 @@ export function AppProvider({ children }: PropsWithChildren) {
               finalNonce = encrypted.nonce;
               finalEncryptionVersion = 'mc-e2ee-v2-pro';
               console.log('[sendMessage] E2EE Pro encryption successful');
+            } else {
+              // Peer's X3DH bundle not found - they may not be online or initialized yet
+              console.warn('[sendMessage] Peer X3DH bundle not found, sending unencrypted. Recipient:', recipientUserId);
+              finalEncryptionVersion = undefined;
+              // Message will send as plaintext and show in chat naturally
             }
           } catch (error) {
-            console.warn('[sendMessage] E2EE Pro encryption failed, falling back:', error);
+            console.warn('[sendMessage] E2EE Pro encryption failed, falling back to plaintext:', error);
             // Fall back to storing unencrypted if E2EE Pro fails
             finalEncryptionVersion = undefined;
           }
         }
         
         const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(replyTo || '');
-        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo, e2eeType: isE2EEPro ? 'pro' : (e2eePassphrase ? 'passphrase' : 'none'), hasEncryption: Boolean(finalCiphertext) });
+        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo, e2eeType: isE2EEPro ? 'pro' : (e2eePassphrase ? 'passphrase' : 'none'), hasEncryption: Boolean(finalCiphertext), encryptionVersion: finalEncryptionVersion });
         
         return client.from('macrochat_messages').insert({
           conversation_id: chatId,
           sender_id: actorUserId,
-          body: finalCiphertext ? '[encrypted]' : (isE2EEPro ? '[encrypted-pro]' : formattedBody),
+          body: finalCiphertext ? '[encrypted]' : formattedBody,
           kind: 'text',
           body_ciphertext: finalCiphertext,
           body_nonce: finalNonce,
