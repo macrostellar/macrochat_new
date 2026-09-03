@@ -90,6 +90,59 @@ export default function E2EEScreen() {
           <Text style={styles.privacyTitle}>🔒 Your Privacy is Guaranteed</Text>
           <Text style={styles.privacyText}>MacroChat uses Signal Protocol — the same encryption standard trusted by WhatsApp, Signal, and tens of millions of users worldwide.</Text>
         </View>
+
+        <Text style={styles.section}>What Can MacroChat & Supabase See?</Text>
+
+        <View style={styles.dataAccessCard}>
+          <View style={styles.dataRow}>
+            <Ionicons name="chatbubble-ellipses" size={18} color={colors.danger} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.dataTitle}>❌ Your Messages</Text>
+              <Text style={styles.dataText}>Encrypted before sending. Database only has unreadable ciphertext. Not even MacroChat admins can read them.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.dataAccessCard}>
+          <View style={styles.dataRow}>
+            <Ionicons name="key" size={18} color={colors.danger} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.dataTitle}>❌ Your Private Keys</Text>
+              <Text style={styles.dataText}>Generated and stored ONLY on your device. Never sent to server. Without your keys, encrypted messages are useless gibberish.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.dataAccessCard}>
+          <View style={styles.dataRow}>
+            <Ionicons name="lock-open" size={18} color={colors.danger} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.dataTitle}>❌ Your Password</Text>
+              <Text style={styles.dataText}>Hashed with bcrypt (one-way encryption). Even Supabase can't reverse it to see your password.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.dataAccessCard}>
+          <View style={styles.dataRow}>
+            <Ionicons name="mail" size={18} color={colors.blue} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.dataTitle}>✓ Your Email</Text>
+              <Text style={styles.dataText}>Needed for login only. Treated like any email service (authentication provider can see it, but has no access to messages).</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.technicalNotice}>
+          <Text style={styles.technicalTitle}>🔐 How Privacy is Enforced</Text>
+          <Text style={styles.technicalText}>
+            • Encryption happens on your device BEFORE sending{"\n"}
+            • X3DH key exchange completes on your device{"\n"}
+            • Private keys never leave your device{"\n"}
+            • Database Row-Level Security (RLS) policies prevent unauthorized access{"\n"}
+            • Even database owners can't decrypt messages without your keys
+          </Text>
+        </View>
       </ScrollView>
   );
 
@@ -118,4 +171,11 @@ const styles = StyleSheet.create({
   privacyNotice: { borderWidth: 2, borderColor: colors.neon, backgroundColor: 'rgba(0,255,200,0.08)', borderRadius: 12, padding: 14, marginTop: 16 },
   privacyTitle: { color: colors.neon, fontWeight: '900', fontSize: 13, marginBottom: 6 },
   privacyText: { color: colors.white, fontSize: 12, lineHeight: 18 },
+  dataAccessCard: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, borderRadius: 12, padding: 12, marginBottom: 10 },
+  dataRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  dataTitle: { color: colors.white, fontWeight: '800', fontSize: 13 },
+  dataText: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  technicalNotice: { borderWidth: 1, borderColor: colors.blue, backgroundColor: 'rgba(59,130,246,0.08)', borderRadius: 12, padding: 14, marginTop: 16 },
+  technicalTitle: { color: colors.blue, fontWeight: '900', fontSize: 13, marginBottom: 6 },
+  technicalText: { color: colors.white, fontSize: 11, lineHeight: 18 },
 });
