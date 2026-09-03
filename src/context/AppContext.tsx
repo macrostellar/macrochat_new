@@ -1667,9 +1667,12 @@ export function AppProvider({ children }: PropsWithChildren) {
     const disappearingSeconds = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
     
     // Try E2EE Pro first, fall back to passphrase
-    let encryptedPayload = null;
+    let encryptedPayload: any = null;
+    let isE2EEPro = false;
+    
     if (e2eePro) {
-      // E2EE Pro will be handled asynchronously after DB insert
+      isE2EEPro = true;
+      // E2EE Pro encryption will happen after we get recipient ID
     } else if (e2eePassphrase) {
       encryptedPayload = encryptTextWithPassphrase(payload, e2eePassphrase);
     }
@@ -1686,8 +1689,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       textColor: options?.textColor,
       fontStyle: options?.fontStyle,
       fontFamily: options?.fontFamily,
-      encrypted: Boolean(encryptedPayload),
-      encryptionVersion: encryptedPayload?.version || (e2eePro ? 'mc-e2ee-v2-pro' : undefined),
+      encrypted: Boolean(encryptedPayload || isE2EEPro),
+      encryptionVersion: encryptedPayload?.version || (isE2EEPro ? 'mc-e2ee-v2-pro' : undefined),
       ciphertext: encryptedPayload?.ciphertext,
       nonce: encryptedPayload?.nonce,
       createdAt: new Date().toISOString(),
@@ -1720,22 +1723,44 @@ export function AppProvider({ children }: PropsWithChildren) {
           })
         : payload;
 
-      client.auth.getSession().then(({ data: sessionData }) => {
+      client.auth.getSession().then(async ({ data: sessionData }) => {
         const actorUserId = sessionData.session?.user.id ?? profile.id;
         const chat = chats.find((c) => c.id === chatId);
         const recipientUserId = chat?.participantUserId;
         
+        // Encrypt with E2EE Pro if available
+        let finalCiphertext = encryptedPayload?.ciphertext;
+        let finalNonce = encryptedPayload?.nonce;
+        let finalEncryptionVersion = encryptedPayload?.version || (isE2EEPro ? 'mc-e2ee-v2-pro' : undefined);
+        
+        if (isE2EEPro && recipientUserId && e2eePro) {
+          try {
+            console.log('[sendMessage] Encrypting with E2EE Pro for recipient:', recipientUserId);
+            const encrypted = await e2eePro.encryptMessageForPeerAuto(payload, recipientUserId);
+            if (encrypted) {
+              finalCiphertext = encrypted.ciphertext;
+              finalNonce = encrypted.nonce;
+              finalEncryptionVersion = 'mc-e2ee-v2-pro';
+              console.log('[sendMessage] E2EE Pro encryption successful');
+            }
+          } catch (error) {
+            console.warn('[sendMessage] E2EE Pro encryption failed, falling back:', error);
+            // Fall back to storing unencrypted if E2EE Pro fails
+            finalEncryptionVersion = undefined;
+          }
+        }
+        
         const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(replyTo || '');
-        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo, e2eeType: e2eePro ? 'pro' : 'passphrase' });
+        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo, e2eeType: isE2EEPro ? 'pro' : (e2eePassphrase ? 'passphrase' : 'none'), hasEncryption: Boolean(finalCiphertext) });
         
         return client.from('macrochat_messages').insert({
           conversation_id: chatId,
           sender_id: actorUserId,
-          body: encryptedPayload ? '[encrypted]' : (e2eePro ? '[encrypted-pro]' : formattedBody),
+          body: finalCiphertext ? '[encrypted]' : (isE2EEPro ? '[encrypted-pro]' : formattedBody),
           kind: 'text',
-          body_ciphertext: encryptedPayload?.ciphertext,
-          body_nonce: encryptedPayload?.nonce,
-          encryption_version: encryptedPayload?.version || (e2eePro ? 'mc-e2ee-v2-pro' : undefined),
+          body_ciphertext: finalCiphertext,
+          body_nonce: finalNonce,
+          encryption_version: finalEncryptionVersion,
           client_id: clientId,
           reply_to: isValidUuid ? replyTo : null,
         }).select('id, client_id');

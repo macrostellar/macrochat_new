@@ -380,6 +380,37 @@ export class E2EEProService {
   }
 
   /**
+   * Encrypt a message for a peer (auto-selects peer's primary device).
+   * Convenience method that fetches peer's device ID automatically.
+   */
+  async encryptMessageForPeerAuto(
+    plaintext: string,
+    peerUserId: string
+  ): Promise<EncryptedMessage | null> {
+    try {
+      // Fetch peer's active devices
+      const { data: devices, error } = await supabase
+        .from('macrochat_devices')
+        .select('id, device_id')
+        .eq('user_id', peerUserId)
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error || !devices || devices.length === 0) {
+        console.warn('No active devices found for peer:', peerUserId);
+        return null;
+      }
+
+      const peerDeviceId = devices[0].device_id;
+      return await this.encryptMessageForPeer(plaintext, peerUserId, peerDeviceId);
+    } catch (error) {
+      console.error('Failed to encrypt message for peer:', error);
+      return null;
+    }
+  }
+
+  /**
    * Decrypt a message from a peer.
    */
   async decryptMessageFromPeer(

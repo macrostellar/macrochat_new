@@ -1,78 +1,95 @@
-import { useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Screen } from '@/components/Screen';
 import { WebSettingsShell } from '@/components/WebSections';
-import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 
 export default function E2EEScreen() {
   const { width } = useWindowDimensions();
   const router = useRouter();
-  const { e2eeEnabled, enableE2EE, disableE2EE, unlockE2EE } = useApp();
-  const [passphrase, setPassphrase] = useState('');
-  const [notice, setNotice] = useState<{ error: boolean; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const onEnable = async () => {
-    if (passphrase.trim().length < 12) return setNotice({ error: true, text: 'Use at least 12 characters for the encryption passphrase.' });
-    setBusy(true);
-    try {
-      await enableE2EE(passphrase);
-      setPassphrase('');
-      setNotice({ error: false, text: 'Encryption enabled. New outgoing text messages will use this device key.' });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onUnlock = async () => {
-    if (!passphrase.trim()) return setNotice({ error: true, text: 'Enter the passphrase originally used on this device.' });
-    setBusy(true);
-    const ok = await unlockE2EE(passphrase);
-    setBusy(false);
-    if (!ok) return setNotice({ error: true, text: 'That passphrase does not match this device encryption key.' });
-    setPassphrase('');
-    setNotice({ error: false, text: 'Encryption unlocked. Encrypted messages can now be decrypted on this device.' });
-  };
-
-  const onDisable = async () => {
-    await disableE2EE();
-    setPassphrase('');
-    setNotice({ error: false, text: 'Encryption is locked on this device. Enter the same passphrase to unlock it.' });
-  };
 
   const content = (
       <ScrollView contentContainerStyle={[styles.content, Platform.OS === 'web' && width >= 820 && styles.webContent]}>
         {!(Platform.OS === 'web' && width >= 820) && (
         <View style={styles.headerRow}>
           <Pressable style={styles.back} onPress={() => router.back()}><Ionicons name="chevron-back" size={23} color={colors.white} /></Pressable>
-          <Text style={styles.title}>E2EE Pro</Text>
+          <Text style={styles.title}>Message Encryption</Text>
         </View>
         )}
 
         <View style={styles.card}>
           <Text style={styles.caption}>Status</Text>
-          <Text style={[styles.state, { color: colors.neon }]}>Enabled (E2EE Pro - Automatic)</Text>
+          <Text style={[styles.state, { color: colors.neon }]}>✓ Enabled (E2EE Pro - Automatic)</Text>
           <Text style={styles.note}>Messages protected with Signal Protocol X3DH + Double Ratchet. Per-device encryption. Forward secrecy. Multi-device support.</Text>
         </View>
 
-        <Text style={styles.section}>Legacy Passphrase Encryption (Optional)</Text>
-        <Text style={styles.legacyNote}>E2EE Pro is active automatically. The passphrase below is for legacy Phase 1 encryption - it's optional and no longer needed.</Text>
-        {notice && <View style={[styles.notice, { borderColor: notice.error ? colors.danger : colors.neon }]}><Ionicons name={notice.error ? 'alert-circle-outline' : 'checkmark-circle-outline'} size={20} color={notice.error ? colors.danger : colors.neon} /><Text style={styles.noticeText}>{notice.text}</Text></View>}
-        <TextInput
-          value={passphrase}
-          onChangeText={setPassphrase}
-          placeholder="Enter secure passphrase"
-          placeholderTextColor={colors.muted}
-          secureTextEntry
-          style={styles.input}
-        />
+        <Text style={styles.section}>How MacroChat Protects Your Privacy</Text>
 
-        <Pressable accessibilityRole="button" style={[styles.primary, (busy || e2eeEnabled) && styles.disabled]} onPress={onEnable} disabled={busy || e2eeEnabled}><Text style={styles.primaryText}>Enable E2EE</Text></Pressable>
-        <Pressable accessibilityRole="button" style={[styles.secondary, (busy || e2eeEnabled) && styles.disabled]} onPress={onUnlock} disabled={busy || e2eeEnabled}><Text style={styles.secondaryText}>Unlock Existing E2EE</Text></Pressable>
-        <Pressable accessibilityRole="button" style={[styles.danger, (busy || !e2eeEnabled) && styles.disabled]} onPress={onDisable} disabled={busy || !e2eeEnabled}><Text style={styles.dangerText}>Lock E2EE on this device</Text></Pressable>
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="lock-closed" size={18} color={colors.neon} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.infoTitle}>End-to-End Encryption</Text>
+              <Text style={styles.infoText}>Every message is encrypted on your device before leaving. Only you and the recipient can read it.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="key" size={18} color={colors.neon} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.infoTitle}>Your Keys Stay Private</Text>
+              <Text style={styles.infoText}>Encryption keys are generated and stored only on your device. Not even MacroChat servers or admins can access your messages.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="finger-print" size={18} color={colors.neon} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.infoTitle}>Device Identity Verification</Text>
+              <Text style={styles.infoText}>Each device has a unique fingerprint. Verify fingerprints with contacts to ensure you're talking to the right person.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="shield-checkmark" size={18} color={colors.neon} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.infoTitle}>No Password Needed</Text>
+              <Text style={styles.infoText}>Sign in once with your email. Encryption works silently in the background. No passphrase to remember.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="trending-up" size={18} color={colors.neon} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.infoTitle}>Forward Secrecy</Text>
+              <Text style={styles.infoText}>Even if a device key is compromised, past messages remain protected. Each message uses a unique encryption key.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Ionicons name="call" size={18} color={colors.neon} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.infoTitle}>Secure Calls & Media</Text>
+              <Text style={styles.infoText}>Voice calls, video calls, and media files use the same military-grade encryption as your messages.</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={[styles.privacyNotice]}>
+          <Text style={styles.privacyTitle}>🔒 Your Privacy is Guaranteed</Text>
+          <Text style={styles.privacyText}>MacroChat uses Signal Protocol — the same encryption standard trusted by WhatsApp, Signal, and tens of millions of users worldwide.</Text>
+        </View>
       </ScrollView>
   );
 
@@ -89,20 +106,16 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
   back: { width: 36, height: 36, borderRadius: 10, backgroundColor: colors.navy800, alignItems: 'center', justifyContent: 'center' },
   title: { color: colors.white, fontWeight: '900', fontSize: 30 },
-  card: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, borderRadius: 16, padding: 14, marginBottom: 16 },
+  card: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, borderRadius: 16, padding: 14, marginBottom: 20 },
   caption: { color: colors.muted, fontSize: 11, fontWeight: '800', letterSpacing: 1.2 },
-  state: { marginTop: 8, fontSize: 22, fontWeight: '900' },
-  note: { color: colors.muted, marginTop: 6, fontSize: 12 },
-  section: { color: colors.blue, fontWeight: '800', fontSize: 12, letterSpacing: 1.2, marginBottom: 8 },
-  legacyNote: { color: colors.muted, fontSize: 12, marginBottom: 12, lineHeight: 18 },
-  input: { height: 52, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, color: colors.white, paddingHorizontal: 14, fontSize: 15 },
-  notice: { borderWidth: 1, padding: 12, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  noticeText: { color: colors.white, fontSize: 12, lineHeight: 18, flex: 1 },
-  disabled: { opacity: 0.45 },
-  primary: { marginTop: 10, height: 50, borderRadius: 14, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' },
-  primaryText: { color: colors.black, fontWeight: '900' },
-  secondary: { marginTop: 10, height: 50, borderRadius: 14, backgroundColor: colors.blue, alignItems: 'center', justifyContent: 'center' },
-  secondaryText: { color: colors.black, fontWeight: '900' },
-  danger: { marginTop: 10, height: 50, borderRadius: 14, borderWidth: 1, borderColor: colors.danger, alignItems: 'center', justifyContent: 'center' },
-  dangerText: { color: colors.danger, fontWeight: '900' },
+  state: { marginTop: 8, fontSize: 18, fontWeight: '900' },
+  note: { color: colors.muted, marginTop: 6, fontSize: 12, lineHeight: 18 },
+  section: { color: colors.blue, fontWeight: '800', fontSize: 12, letterSpacing: 1.2, marginBottom: 12, marginTop: 8 },
+  infoCard: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, borderRadius: 12, padding: 12, marginBottom: 10 },
+  infoRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  infoTitle: { color: colors.white, fontWeight: '800', fontSize: 13 },
+  infoText: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  privacyNotice: { borderWidth: 2, borderColor: colors.neon, backgroundColor: 'rgba(0,255,200,0.08)', borderRadius: 12, padding: 14, marginTop: 16 },
+  privacyTitle: { color: colors.neon, fontWeight: '900', fontSize: 13, marginBottom: 6 },
+  privacyText: { color: colors.white, fontSize: 12, lineHeight: 18 },
 });
