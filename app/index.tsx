@@ -8,7 +8,7 @@ import { signInWithGoogle } from '@/lib/supabase';
 import { colors } from '@/theme/colors';
 
 export default function WelcomeScreen() {
-  const { profile, loading, register, backendMode } = useApp();
+  const { profile, loading, register, restoreProfile, backendMode } = useApp();
   const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -61,6 +61,11 @@ export default function WelcomeScreen() {
     setGoogleLoading(true);
     try {
       const session = await signInWithGoogle();
+      const existingProfile = await restoreProfile();
+      if (existingProfile) {
+        router.replace('/(tabs)');
+        return;
+      }
       const suggestedName =
         name.trim()
         || session?.user.user_metadata?.full_name
@@ -122,6 +127,10 @@ export default function WelcomeScreen() {
                 <Text style={styles.googleButtonText}>Continue with Google</Text>
               </>}
           </Pressable>
+          <Pressable style={styles.recoverButton} onPress={() => router.push('/recover-account')}>
+            <Ionicons name="key-outline" size={17} color={colors.blue} />
+            <Text style={styles.recoverButtonText}>Recover existing account</Text>
+          </Pressable>
           <View style={styles.security}><Ionicons name="shield-checkmark" color={colors.neon} size={16} /><Text style={styles.securityText}>Secure local identity · {backendMode === 'demo' ? 'Offline mode' : 'Online mode'}</Text></View>
         </Animated.View>
       </ScrollView>
@@ -145,6 +154,8 @@ const styles = StyleSheet.create({
   buttonText: { color: colors.black, fontSize: 16, fontWeight: '900' },
   googleButton: { height: 54, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, marginTop: 10, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 9 },
   googleButtonText: { color: colors.white, fontSize: 15, fontWeight: '800' },
+  recoverButton: { height: 48, marginTop: 6, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
+  recoverButtonText: { color: colors.blue, fontSize: 14, fontWeight: '800' },
   security: { marginTop: 22, flexDirection: 'row', alignItems: 'center', gap: 7, justifyContent: 'center' },
   securityText: { color: colors.muted, fontSize: 12 },
 });

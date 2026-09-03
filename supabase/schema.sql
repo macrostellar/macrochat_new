@@ -7,6 +7,7 @@ create table if not exists public.macrochat_profiles (
   macro_id text not null unique check (macro_id ~ '^MC-[A-Z]+-[0-9]{4}$'),
   display_name text not null check (char_length(display_name) between 2 and 32),
   avatar_color text not null default '#55B9FF',
+  avatar_url text,
   created_at timestamptz not null default now(),
   last_seen timestamptz not null default now()
 );

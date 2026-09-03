@@ -1,24 +1,68 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { Audio } from 'expo-av';
 import { Avatar } from '@/components/Avatar';
+import { WebMessenger } from '@/components/WebMessenger';
 import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 import type { Message } from '@/types';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-function ticks(message: Message) {
-  if (message.status === 'sending') return '◷';
-  if (message.status === 'failed') return '!';
-  if (message.status === 'sent') return '✓';
-  return '✓✓';
+function MessageTicks({ status }: { status: Message['status'] }) {
+  if (status === 'sending') return <Text style={{ color: colors.muted, fontSize: 10 }}>◷</Text>;
+  if (status === 'failed') return <Text style={{ color: colors.danger, fontSize: 10, fontWeight: '900' }}>!</Text>;
+  if (status === 'sent') return <Ionicons name="checkmark" size={15} color={colors.muted} />;
+  return <Ionicons name="checkmark-done" size={16} color={colors.neon} />;
+}
+
+function CallMessageBubble({ item }: { item: Message }) {
+  const isVideo = Boolean(item.callInfo?.video);
+  const outcome = item.callInfo?.outcome || 'missed';
+  const isMissed = outcome === 'missed';
+  const isDeclined = outcome === 'rejected';
+
+  let label = isVideo ? 'Video call' : 'Voice call';
+  let detail = 'Accepted on another device';
+  if (isMissed) detail = 'Missed';
+  else if (isDeclined) detail = 'Declined';
+  else if (item.callInfo?.durationSeconds) {
+    const mins = Math.floor(item.callInfo.durationSeconds / 60);
+    const secs = item.callInfo.durationSeconds % 60;
+    detail = `${mins}:${String(secs).padStart(2, '0')}`;
+  }
+
+  return (
+    <View style={{ alignSelf: 'center', marginVertical: 10, width: '100%', maxWidth: 360 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: colors.navy800, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: isMissed ? 'rgba(255,107,107,0.3)' : colors.border }}>
+        <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: isMissed ? colors.danger : colors.blue, alignItems: 'center', justifyContent: 'center' }}>
+          <Ionicons name={isVideo ? 'videocam' : 'call'} size={18} color={isMissed ? colors.danger : colors.white} />
+        </View>
+        <View style={{ flex: 1, marginLeft: 10 }}>
+          <Text style={{ color: colors.white, fontSize: 13, fontWeight: '800' }}>{label}</Text>
+          <Text style={{ color: isMissed ? colors.danger : colors.muted, fontSize: 11, marginTop: 2 }}>{detail}</Text>
+        </View>
+        <Text style={{ color: colors.muted, fontSize: 10, marginLeft: 8 }}>
+          {new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function expiryLabel(expiresAt: string) {
+  const remaining = new Date(expiresAt).getTime() - Date.now();
+  if (remaining <= 0) return 'expired';
+  if (remaining < 60 * 60 * 1000) return `${Math.ceil(remaining / 60000)}m`;
+  if (remaining < 24 * 60 * 60 * 1000) return `${Math.ceil(remaining / 3600000)}h`;
+  return `${Math.ceil(remaining / 86400000)}d`;
 }
 
 export default function ConversationScreen() {
+  const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string | string[] }>();
   const chatId = Array.isArray(id) ? id[0] : id;
@@ -115,6 +159,10 @@ export default function ConversationScreen() {
       clearTimeout(timeoutHandle);
     };
   }, [chat, recording, webRecording, text, sendChatActivity]);
+
+  if (Platform.OS === 'web' && width >= 820) {
+    return <WebMessenger initialChatId={chatId} />;
+  }
 
   if (!chat && (loading || resolvingMissing)) {
     return <View style={styles.page}><Text style={styles.missing}>Loading conversation...</Text></View>;
@@ -358,19 +406,31 @@ export default function ConversationScreen() {
         };
         recorder.onstop = () => {
           const blob = new Blob(webRecorderChunks.current, { type: recorder.mimeType || 'audio/webm' });
-          const uri = URL.createObjectURL(blob);
           const duration = recordingSince ? Date.now() - recordingSince : 0;
           stream.getTracks().forEach((track) => track.stop());
-          sendAttachment({
-            kind: 'voice',
-            uri,
-            fileName: `voice-${Date.now()}.webm`,
-            mimeType: blob.type || 'audio/webm',
-            durationMs: duration,
-          }).catch(() => Alert.alert('Voice note failed', 'Unable to send recorded voice note.'));
-          webRecorder.current = null;
-          setWebRecording(false);
-          setRecordingSince(null);
+          
+          // Convert blob to data URL immediately to avoid ephemeral blob URL issues
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result as string;
+            sendAttachment({
+              kind: 'voice',
+              uri: dataUrl,
+              fileName: `voice-${Date.now()}.webm`,
+              mimeType: blob.type || 'audio/webm',
+              durationMs: duration,
+            }).catch(() => Alert.alert('Voice note failed', 'Unable to send recorded voice note.'));
+            webRecorder.current = null;
+            setWebRecording(false);
+            setRecordingSince(null);
+          };
+          reader.onerror = () => {
+            Alert.alert('Voice note failed', 'Could not process voice recording.');
+            webRecorder.current = null;
+            setWebRecording(false);
+            setRecordingSince(null);
+          };
+          reader.readAsDataURL(blob);
         };
         recorder.start();
         webRecorder.current = recorder;
@@ -488,11 +548,20 @@ export default function ConversationScreen() {
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         renderItem={({ item }) => {
+          if (item.kind === 'call') {
+            return <CallMessageBubble item={item} />;
+          }
+
           const mine = item.senderId === 'me';
           const replied = item.replyTo ? chat.messages.find((message) => message.id === item.replyTo) : null;
+          const isImage = item.kind === 'image' || Boolean(
+            item.mediaUrl?.startsWith('data:image/') ||
+            item.mimeType?.startsWith('image/') ||
+            item.fileName?.match(/\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i)
+          );
           const voicePayload = item.kind === 'voice' && item.mediaUrl ? { uri: item.mediaUrl, durationMs: item.durationMs || 0 } : null;
-          const imagePayload = item.kind === 'image' && item.mediaUrl ? { uri: item.mediaUrl, name: item.fileName || 'Image' } : null;
-          const filePayload = item.kind === 'file' ? { name: item.fileName || item.text } : null;
+          const imagePayload = isImage && item.mediaUrl ? { uri: item.mediaUrl, name: item.fileName || 'Image' } : null;
+          const filePayload = !isImage && item.kind === 'file' ? { name: item.fileName || item.text } : null;
           const isPlaying = activeVoiceId === item.id;
           const playbackDuration = voicePayload ? Math.max(activeVoiceProgress.duration || voicePayload.durationMs || 1, 1) : 1;
           const playbackPosition = voicePayload && isPlaying ? activeVoiceProgress.position : 0;
@@ -524,9 +593,18 @@ export default function ConversationScreen() {
                   <Text style={styles.attachText} numberOfLines={1}>{filePayload.name}</Text>
                 </View>
               ) : (
-                <Text style={styles.messageText}>{item.text}</Text>
+                <Text
+                  style={[
+                    styles.messageText,
+                    item.textColor ? { color: item.textColor } : null,
+                    item.fontStyle ? { fontStyle: item.fontStyle } : null,
+                    item.fontFamily ? { fontFamily: item.fontFamily as any } : null,
+                  ]}
+                >
+                  {item.text}
+                </Text>
               )}
-              <View style={styles.meta}><Text style={styles.time}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>{mine && <Text style={[styles.tick, item.status === 'read' && { color: colors.blue }, item.status === 'failed' && { color: colors.danger }]}>{ticks(item)}</Text>}</View>
+              <View style={styles.meta}>{item.expiresAt && <Text style={styles.expiry}>◷ {expiryLabel(item.expiresAt)}</Text>}<Text style={styles.time}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>{mine && <MessageTicks status={item.status} />}</View>
               {item.reaction && <View style={styles.reaction}><Text>{item.reaction}</Text></View>}
             </Pressable>
           );
@@ -603,7 +681,7 @@ const styles = StyleSheet.create({
   callReject: { minWidth: 88, height: 32, borderRadius: 8, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center' },
   callActionText: { color: colors.black, fontWeight: '800', fontSize: 12 },
   messagesList: { flex: 1 },
-  messages: { padding: 14, paddingTop: 20, gap: 8 }, bubble: { maxWidth: '82%', borderRadius: 17, paddingHorizontal: 13, paddingTop: 9, paddingBottom: 6 }, mine: { alignSelf: 'flex-end', backgroundColor: '#164B6D', borderBottomRightRadius: 4 }, theirs: { alignSelf: 'flex-start', backgroundColor: colors.navy800, borderBottomLeftRadius: 4 }, messageText: { color: colors.white, fontSize: 15, lineHeight: 21 }, meta: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 4, marginTop: 3 }, time: { color: '#A9B9CB', fontSize: 9 }, tick: { color: colors.muted, fontSize: 11, fontWeight: '800' }, reply: { borderLeftWidth: 3, borderLeftColor: colors.neon, paddingLeft: 8, paddingVertical: 5, marginBottom: 6, backgroundColor: colors.overlay, borderRadius: 5 }, replyText: { color: colors.muted, fontSize: 12 }, reaction: { position: 'absolute', bottom: -14, right: 8, backgroundColor: colors.navy700, borderRadius: 12, paddingHorizontal: 7, paddingVertical: 3, borderWidth: 1, borderColor: colors.border },
+  messages: { padding: 14, paddingTop: 20, gap: 8 }, bubble: { maxWidth: '82%', borderRadius: 17, paddingHorizontal: 13, paddingTop: 9, paddingBottom: 6 }, mine: { alignSelf: 'flex-end', backgroundColor: '#164B6D', borderBottomRightRadius: 4 }, theirs: { alignSelf: 'flex-start', backgroundColor: colors.navy800, borderBottomLeftRadius: 4 }, messageText: { color: colors.white, fontSize: 15, lineHeight: 21 }, meta: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 4, marginTop: 3 }, time: { color: '#A9B9CB', fontSize: 9 }, expiry: { color: colors.blue, fontSize: 9 }, tick: { color: colors.muted, fontSize: 11, fontWeight: '800' }, reply: { borderLeftWidth: 3, borderLeftColor: colors.neon, paddingLeft: 8, paddingVertical: 5, marginBottom: 6, backgroundColor: colors.overlay, borderRadius: 5 }, replyText: { color: colors.muted, fontSize: 12 }, reaction: { position: 'absolute', bottom: -14, right: 8, backgroundColor: colors.navy700, borderRadius: 12, paddingHorizontal: 7, paddingVertical: 3, borderWidth: 1, borderColor: colors.border },
   encryptedTag: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 4 },
   encryptedText: { color: colors.neon, fontSize: 10, fontWeight: '800' },
   attachmentPanel: { marginHorizontal: 12, marginBottom: 8, borderRadius: 14, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border, padding: 10, flexDirection: 'row', gap: 10 },

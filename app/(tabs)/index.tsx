@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { FlatList, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Avatar } from '@/components/Avatar';
 import { Screen } from '@/components/Screen';
+import { WebMessenger } from '@/components/WebMessenger';
 import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 
@@ -12,9 +13,12 @@ function timeLabel(iso: string) {
 }
 
 export default function ChatsScreen() {
+  const { width } = useWindowDimensions();
   const { chats, profile, mfaAal2, e2eeEnabled } = useApp();
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => chats.filter((chat) => `${chat.name} ${chat.macroId}`.toLowerCase().includes(query.toLowerCase())), [chats, query]);
+
+  if (Platform.OS === 'web' && width >= 820) return <WebMessenger />;
 
   return (
     <Screen>

@@ -1,4 +1,5 @@
 import { Redirect, Tabs } from 'expo-router';
+import { Platform, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
@@ -8,6 +9,7 @@ const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
 };
 
 export default function TabLayout() {
+  const { width } = useWindowDimensions();
   const { profile, loading } = useApp();
   if (!loading && !profile) return <Redirect href="/" />;
   return (
@@ -15,7 +17,9 @@ export default function TabLayout() {
       headerShown: false,
       tabBarActiveTintColor: colors.neon,
       tabBarInactiveTintColor: colors.muted,
-      tabBarStyle: { backgroundColor: colors.black, borderTopColor: colors.blueDark, height: 78, paddingTop: 8 },
+      tabBarStyle: Platform.OS === 'web' && width >= 820
+        ? { display: 'none' }
+        : { backgroundColor: colors.black, borderTopColor: colors.blueDark, height: 78, paddingTop: 8 },
       tabBarLabelStyle: { fontSize: 11, fontWeight: '700', paddingBottom: 9 },
       tabBarIcon: ({ color, size }) => <Ionicons name={icons[route.name] ?? 'ellipse'} color={color} size={size} />,
     })}>

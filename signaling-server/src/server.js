@@ -3,14 +3,14 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import jwt from 'jsonwebtoken';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 const app = express();
 const server = createServer(app);
 
 const rawOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
 const allowed = rawOrigins.length > 0 ? rawOrigins : ['http://localhost:8081'];
-const jwtSecret = process.env.JWT_SECRET;
+const jwtSecret = process.env.JWT_SECRET && process.env.JWT_SECRET !== 'replace_me' ? process.env.JWT_SECRET : null;
 const jwtAudience = process.env.JWT_AUDIENCE || 'authenticated';
 const jwtIssuer = process.env.JWT_ISSUER;
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -22,8 +22,13 @@ const eventLimits = {
   maxEvents: Number(process.env.EVENT_LIMIT_MAX || 80),
 };
 
-if (!jwtSecret) {
-  throw new Error('JWT_SECRET must be configured');
+// Modern Supabase projects sign access tokens with an asymmetric key (ES256/RS256) verified via JWKS.
+// Older projects may still use a shared HS256 secret - keep that as a fallback.
+const remoteJwks = supabaseUrl ? createRemoteJWKSet(new URL(`${supabaseUrl}/auth/v1/.well-known/jwks.json`)) : null;
+const legacySecretKey = jwtSecret ? new TextEncoder().encode(jwtSecret) : null;
+
+if (!remoteJwks && !legacySecretKey) {
+  throw new Error('Configure SUPABASE_URL (for JWKS verification) or JWT_SECRET (legacy HS256) to verify call auth tokens');
 }
 
 if (requireConversationMembership && (!supabaseUrl || !supabaseServiceRoleKey)) {
@@ -168,6 +173,24 @@ async function ensureUsersInConversation(conversationId, callerUserId, calleeUse
   return present.has(callerUserId) && present.has(calleeUserId);
 }
 
+async function ensureUsersNotBlocked(firstUserId, secondUserId) {
+  if (!supabaseUrl || !supabaseServiceRoleKey) return false;
+  const first = encodeURIComponent(firstUserId);
+  const second = encodeURIComponent(secondUserId);
+  const filter = `or=(and(blocker_id.eq.${first},blocked_id.eq.${second}),and(blocker_id.eq.${second},blocked_id.eq.${first}))`;
+  const response = await fetch(`${supabaseUrl}/rest/v1/macrochat_blocked_users?select=blocker_id&${filter}`, {
+    method: 'GET',
+    headers: {
+      apikey: supabaseServiceRoleKey,
+      Authorization: `Bearer ${supabaseServiceRoleKey}`,
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) throw new Error(`Block check failed with HTTP ${response.status}`);
+  const rows = await response.json();
+  return Array.isArray(rows) && rows.length === 0;
+}
+
 function requireActiveCall(callId, actorUserId) {
   const call = activeCalls.get(callId);
   if (!call) throw new Error('Call not found or expired');
@@ -177,16 +200,23 @@ function requireActiveCall(callId, actorUserId) {
   return call;
 }
 
-function requireAuth(socket, next) {
+async function requireAuth(socket, next) {
   try {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('Missing auth token'));
 
-    const payload = jwt.verify(token, jwtSecret, {
-      audience: jwtAudience,
-      issuer: jwtIssuer,
-      algorithms: ['HS256'],
-    });
+    let payload;
+    if (remoteJwks) {
+      try {
+        ({ payload } = await jwtVerify(token, remoteJwks, { audience: jwtAudience, issuer: jwtIssuer }));
+      } catch (jwksError) {
+        if (!legacySecretKey) throw jwksError;
+        ({ payload } = await jwtVerify(token, legacySecretKey, { audience: jwtAudience, issuer: jwtIssuer, algorithms: ['HS256'] }));
+      }
+    } else {
+      ({ payload } = await jwtVerify(token, legacySecretKey, { audience: jwtAudience, issuer: jwtIssuer, algorithms: ['HS256'] }));
+    }
+
     const userId = payload.sub || payload.userId;
     if (!userId || typeof userId !== 'string') return next(new Error('Invalid auth subject'));
 
@@ -212,8 +242,11 @@ io.on('connection', (socket) => {
       throw new Error('Cannot call yourself');
     }
 
-    const authorized = await ensureUsersInConversation(conversationId, userId, toUserId);
-    if (!authorized) {
+    const [authorized, notBlocked] = await Promise.all([
+      ensureUsersInConversation(conversationId, userId, toUserId),
+      ensureUsersNotBlocked(userId, toUserId),
+    ]);
+    if (!authorized || !notBlocked) {
       throw new Error('Call is not authorized for this conversation');
     }
 

@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { WebNewChat } from '@/components/WebSections';
 import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 
 const MACRO_ID_REGEX = /^MC-[A-Z]+-\d{4}$/i;
 
 export default function NewChatScreen() {
+  const { width } = useWindowDimensions();
   const params = useLocalSearchParams<{ macroId?: string | string[]; autoStart?: string | string[] }>();
   const { addChat } = useApp();
   const [macroId, setMacroId] = useState('');
@@ -62,6 +64,10 @@ export default function NewChatScreen() {
     setMacroId(nextMacroId.toUpperCase());
     start(nextMacroId);
   }, [params.autoStart, params.macroId, start, starting]);
+
+  if (Platform.OS === 'web' && width >= 820) {
+    return <WebNewChat macroId={macroId} onChangeMacroId={setMacroId} onStart={() => start()} starting={starting} />;
+  }
 
   return (
     <View style={styles.page}>

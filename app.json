@@ -10,10 +10,10 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.macrochat.app"
+      "bundleIdentifier": "com.rpp.macrochat"
     },
     "android": {
-      "package": "com.macrochat.app",
+      "package": "com.rpp.macrochat",
       "versionCode": 1,
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
@@ -26,7 +26,9 @@
       ]
     },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/images/fav.png"
     },
     "plugins": [
       "expo-router",

@@ -1,0 +1,41 @@
+// @ts-nocheck
+import { createClient } from 'npm:@supabase/supabase-js@2';
+import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
+
+serve(async (request) => {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  const authorization = request.headers.get('authorization');
+
+  if (!supabaseUrl || !serviceRoleKey) {
+    return Response.json({ error: 'Cleanup environment is not configured.' }, { status: 500 });
+  }
+  if (authorization !== `Bearer ${serviceRoleKey}`) {
+    return Response.json({ error: 'Unauthorized.' }, { status: 401 });
+  }
+
+  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const { data: deletedMessages, error: cleanupError } = await supabase.rpc('macrochat_cleanup_expired_messages');
+  if (cleanupError) return Response.json({ error: cleanupError.message }, { status: 500 });
+
+  const { data: queuedMedia, error: queueError } = await supabase
+    .from('macrochat_expired_media_queue')
+    .select('media_path')
+    .order('queued_at', { ascending: true })
+    .limit(500);
+  if (queueError) return Response.json({ error: queueError.message }, { status: 500 });
+
+  const paths = (queuedMedia ?? []).map((item) => item.media_path);
+  if (paths.length > 0) {
+    const { error: storageError } = await supabase.storage.from('macrochat-media').remove(paths);
+    if (storageError) return Response.json({ error: storageError.message, deletedMessages }, { status: 500 });
+
+    const { error: clearError } = await supabase.from('macrochat_expired_media_queue').delete().in('media_path', paths);
+    if (clearError) return Response.json({ error: clearError.message, deletedMessages }, { status: 500 });
+  }
+
+  return Response.json({ deletedMessages, deletedMedia: paths.length });
+});

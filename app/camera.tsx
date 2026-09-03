@@ -1,8 +1,10 @@
 import { useRef, useState } from 'react';
-import { Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { CameraView, type CameraType, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
+import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 
 type FilterPreset = {
@@ -20,12 +22,16 @@ const FILTERS: FilterPreset[] = [
 ];
 
 export default function CameraScreen() {
+  const { intent } = useLocalSearchParams<{ intent?: string }>();
+  const { postUpdate } = useApp();
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
   const [facing, setFacing] = useState<CameraType>('back');
   const [recording, setRecording] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [previewKind, setPreviewKind] = useState<'photo' | 'video'>('photo');
+  const [posting, setPosting] = useState(false);
   const [activeFilter, setActiveFilter] = useState(FILTERS[0]);
 
   const ensurePermissions = async () => {
@@ -44,7 +50,10 @@ export default function CameraScreen() {
     const allowed = await ensurePermissions();
     if (!allowed) return Alert.alert('Permission needed', 'Enable camera and microphone permissions first.');
     const result = await cameraRef.current?.takePictureAsync({ quality: 0.8 });
-    if (result?.uri) setPreviewUri(result.uri);
+    if (result?.uri) {
+      setPreviewKind('photo');
+      setPreviewUri(result.uri);
+    }
   };
 
   const startOrStopRecording = async () => {
@@ -54,12 +63,51 @@ export default function CameraScreen() {
       setRecording(true);
       const video = await cameraRef.current?.recordAsync({ maxDuration: 20 });
       setRecording(false);
-      if (video?.uri) setPreviewUri(video.uri);
+      if (video?.uri) {
+        setPreviewKind('video');
+        setPreviewUri(video.uri);
+      }
       return;
     }
 
     cameraRef.current?.stopRecording();
     setRecording(false);
+  };
+
+  const pickFromGallery = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images', 'videos'],
+      allowsEditing: false,
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      setPreviewUri(asset.uri);
+      setPreviewKind(asset.type === 'video' ? 'video' : 'photo');
+    }
+  };
+
+  const usePreview = async () => {
+    console.log('[usePreview] Called with previewUri:', previewUri, 'intent:', intent);
+    if (!previewUri) return;
+    if (intent !== 'update') {
+      console.log('[usePreview] Intent is not update, going back');
+      router.back();
+      return;
+    }
+    console.log('[usePreview] Posting update with kind:', previewKind);
+    setPosting(true);
+    try {
+      console.log('[usePreview] Calling postUpdate');
+      await postUpdate({ kind: previewKind, uri: previewUri });
+      console.log('[usePreview] postUpdate successful, navigating to updates');
+      router.push('/(tabs)/updates');
+    } catch (error) {
+      console.error('[usePreview] Error:', error);
+      Alert.alert('Update failed', error instanceof Error ? error.message : 'Try again.');
+    } finally {
+      setPosting(false);
+    }
   };
 
   if (!cameraPermission) return <View style={styles.page} />;
@@ -68,17 +116,27 @@ export default function CameraScreen() {
     <View style={styles.page}>
       {previewUri ? (
         <View style={styles.previewWrap}>
-          <Image source={{ uri: previewUri }} style={styles.previewImage} resizeMode="cover" />
-          <View pointerEvents="none" style={[styles.filterOverlay, { backgroundColor: activeFilter.overlay }]} />
+          {previewKind === 'video' ? (
+            <View style={[styles.previewImage, styles.videoPlaceholder]}>
+              <Ionicons name="videocam" size={48} color={colors.white} />
+              <Text style={styles.videoPlaceholderText}>Video ready to post</Text>
+            </View>
+          ) : (
+            <Image source={{ uri: previewUri }} style={styles.previewImage} resizeMode="cover" />
+          )}
+          <View style={[styles.filterOverlay, { backgroundColor: activeFilter.overlay, pointerEvents: 'none' }]} />
+          <Pressable style={styles.previewClose} onPress={() => setPreviewUri(null)}><Ionicons name="close" size={24} color={colors.white} /></Pressable>
           <View style={styles.previewActions}>
-            <Pressable style={styles.previewBtn} onPress={() => setPreviewUri(null)}><Text style={styles.previewBtnText}>Retake</Text></Pressable>
-            <Pressable style={styles.previewBtn} onPress={() => router.back()}><Text style={styles.previewBtnText}>Use</Text></Pressable>
+            <Pressable style={styles.previewBtn} onPress={() => setPreviewUri(null)} disabled={posting}><Text style={styles.previewBtnText}>Retake</Text></Pressable>
+            <Pressable style={styles.previewBtn} onPress={usePreview} disabled={posting}>
+              {posting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.previewBtnText}>{intent === 'update' ? 'Post update' : 'Use'}</Text>}
+            </Pressable>
           </View>
         </View>
       ) : (
         <>
           <CameraView ref={cameraRef} style={styles.camera} facing={facing} mode="picture">
-            <View pointerEvents="none" style={[styles.filterOverlay, { backgroundColor: activeFilter.overlay }]} />
+            <View style={[styles.filterOverlay, { backgroundColor: activeFilter.overlay, pointerEvents: 'none' }]} />
             <View style={styles.topBar}>
               <Pressable style={styles.topBtn} onPress={() => router.back()}><Ionicons name="close" size={26} color={colors.white} /></Pressable>
               <Pressable style={styles.topBtn} onPress={() => setFacing((value) => value === 'back' ? 'front' : 'back')}><Ionicons name="camera-reverse-outline" size={24} color={colors.white} /></Pressable>
@@ -99,12 +157,18 @@ export default function CameraScreen() {
             </ScrollView>
 
             <View style={styles.bottomRow}>
+              <Pressable style={styles.secondaryCapture} onPress={pickFromGallery}>
+                <Ionicons name="image" size={22} color={colors.white} />
+              </Pressable>
               <Pressable style={styles.secondaryCapture} onPress={startOrStopRecording}>
                 <Ionicons name={recording ? 'stop' : 'videocam'} size={22} color={recording ? colors.danger : colors.white} />
               </Pressable>
               <Pressable style={styles.mainCapture} onPress={takePhoto}><View style={styles.mainCaptureInner} /></Pressable>
               <Pressable style={styles.secondaryCapture} onPress={() => setFacing((value) => value === 'back' ? 'front' : 'back')}>
                 <Ionicons name="camera-reverse-outline" size={22} color={colors.white} />
+              </Pressable>
+              <Pressable style={styles.secondaryCapture} onPress={() => router.back()}>
+                <Ionicons name="close" size={22} color={colors.white} />
               </Pressable>
             </View>
           </View>
@@ -132,6 +196,9 @@ const styles = StyleSheet.create({
   mainCaptureInner: { width: 62, height: 62, borderRadius: 31, backgroundColor: colors.white },
   previewWrap: { flex: 1 },
   previewImage: { flex: 1 },
+  videoPlaceholder: { alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: colors.navy800 },
+  videoPlaceholderText: { color: colors.white, fontWeight: '700' },
+  previewClose: { position: 'absolute', top: 54, right: 18, width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' },
   previewActions: { position: 'absolute', bottom: 36, left: 0, right: 0, flexDirection: 'row', justifyContent: 'space-evenly' },
   previewBtn: { minWidth: 120, height: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.white, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   previewBtnText: { color: colors.white, fontWeight: '800' },

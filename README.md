@@ -34,6 +34,18 @@ Requirements: Node.js 20 or 22 LTS, npm, and Expo Go on the phone.
 5. Copy `.env.example` to `.env` and provide `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY`.
 6. Restart Expo and create a new identity.
 
+### Account recovery providers
+
+Anonymous Macro IDs remain the default and require no email or phone. To let users optionally restore the same ID on another device, configure Supabase Authentication:
+
+- Email recovery: enable the Email provider and use an OTP email template containing `{{ .Token }}`.
+- Phone recovery: enable the Phone provider and configure an SMS provider.
+- Google recovery: enable Google, enable manual identity linking, and allow both `macrochat://auth/callback` and `https://chat.macrostellar.com/auth/callback` as redirect URLs.
+
+For local OAuth testing, also add `http://localhost:8081/auth/callback` to the redirect allowlist. Under Authentication > Multi-Factor Authentication, enable TOTP enrollment before testing the 2FA page. The Phone provider remains unavailable until an SMS provider is configured.
+
+Users connect these methods from **Settings > Account and recovery**. A Macro ID is public and is never accepted as the only account-recovery credential.
+
 ## In-app MFA and E2EE setup
 
 After sign-in, open Settings and use:
@@ -49,6 +61,20 @@ For existing projects, run:
 - `supabase/mfa-aal2-enforcement.sql`
 
 Once MFA enforcement script is active, AAL2 sessions are required by RLS to access chat data.
+
+## Privacy controls deployment
+
+Read receipts, server-enforced contact blocking, and disappearing messages require the privacy migration and cleanup worker:
+
+1. Run `supabase/privacy-controls-migration.sql` in the Supabase SQL Editor before deploying the updated app.
+2. Authenticate and deploy the cleanup worker:
+	- `supabase login`
+	- `supabase functions deploy cleanup-expired-messages --project-ref pofbkteiymgiwciamyll --use-api`
+3. In Supabase Vault, create `macrochat_project_url` and `macrochat_service_role_key`, then run `supabase/cleanup-expired-messages-cron.sql` in the SQL Editor. This schedules cleanup every five minutes. Never expose the service-role key in the app or web bundle.
+4. Redeploy `signaling-server/` so blocked contacts are rejected before call invitations are relayed.
+5. Build and upload the web app only after steps 1-4.
+
+The database hides expired messages immediately. The scheduled worker permanently deletes expired message rows and removes queued files from the private `macrochat-media` bucket. Signed media URLs are limited to five minutes.
 
 ## Test with two users
 
@@ -74,6 +100,19 @@ Use Cloudflare quick tunnel (no account needed):
 3. Share the generated `https://*.trycloudflare.com` link.
 
 That is the fastest way to let other people test your local web app in their browser.
+
+## Deploy chat.macrostellar.com on SiteGround
+
+Keep mobile and web in this Expo project. Shared authentication, Supabase messaging, encryption, types, and state stay in `src/`; web-only desktop presentation lives in `src/components/WebMessenger.tsx`. Split into a separate web app only if the web product later needs a fundamentally different framework or release team.
+
+1. Set production `EXPO_PUBLIC_*` values in `.env`. Never add a Supabase service-role key.
+2. Run `npm run build:web`.
+3. In SiteGround, point `chat.macrostellar.com` to an empty document root.
+4. Upload the **contents** of `dist/` to that document root, including the generated `.htaccess` file.
+5. Enable SSL and force HTTPS in SiteGround.
+6. Add `https://chat.macrostellar.com` and `https://chat.macrostellar.com/auth/callback` to Supabase Authentication redirect URLs.
+
+Each release repeats steps 2 and 4. The `.htaccess` fallback allows direct links and browser refreshes on Expo Router routes.
 
 ## In-app call stack (self-hosted foundation)
 

@@ -47,3 +47,10 @@ export async function verifyTOTP(factorId: string, code: string, challengeId?: s
   if (error) throw error;
   return data;
 }
+
+export async function removeMFAFactor(factorId: string) {
+  if (!supabase) throw new Error('Supabase is not configured.');
+  const { data, error } = await supabase.auth.mfa.unenroll({ factorId });
+  if (error) throw error;
+  return data;
+}

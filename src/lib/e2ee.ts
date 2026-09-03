@@ -4,6 +4,8 @@ import nacl from 'tweetnacl';
 import { decodeUTF8, encodeBase64, decodeBase64, encodeUTF8 } from 'tweetnacl-util';
 
 const PASSPHRASE_KEY = 'macrochat.e2ee.passphrase';
+const VERIFIER_KEY = 'macrochat.e2ee.verifier';
+const VERIFIER_TEXT = 'macrochat-e2ee-key-verifier';
 export const E2EE_VERSION = 'mc-e2ee-v1';
 
 function deriveKey(passphrase: string) {
@@ -35,15 +37,37 @@ async function deleteItem(key: string) {
 }
 
 export async function readE2EEPassphrase() {
-  return getItem(PASSPHRASE_KEY);
+  const passphrase = await getItem(PASSPHRASE_KEY);
+  if (passphrase && !(await getItem(VERIFIER_KEY))) {
+    await writeVerifier(passphrase);
+  }
+  return passphrase;
 }
 
 export async function writeE2EEPassphrase(passphrase: string) {
-  await setItem(PASSPHRASE_KEY, passphrase.trim());
+  const normalized = passphrase.trim();
+  await setItem(PASSPHRASE_KEY, normalized);
+  await writeVerifier(normalized);
 }
 
 export async function clearE2EEPassphrase() {
   await deleteItem(PASSPHRASE_KEY);
+}
+
+async function writeVerifier(passphrase: string) {
+  const encrypted = encryptTextWithPassphrase(VERIFIER_TEXT, passphrase);
+  await setItem(VERIFIER_KEY, JSON.stringify(encrypted));
+}
+
+export async function verifyE2EEPassphrase(passphrase: string) {
+  const stored = await getItem(VERIFIER_KEY);
+  if (!stored) return false;
+  try {
+    const verifier = JSON.parse(stored) as { ciphertext: string; nonce: string };
+    return decryptTextWithPassphrase(verifier.ciphertext, verifier.nonce, passphrase.trim()) === VERIFIER_TEXT;
+  } catch {
+    return false;
+  }
 }
 
 export function encryptTextWithPassphrase(text: string, passphrase: string) {
