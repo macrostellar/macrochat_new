@@ -42,7 +42,6 @@ export function connectCallSignaling(signalingUrl: string, token: string, handle
   }
 
   socket = io(signalingUrl, {
-    transports: ['websocket'],
     auth: { token },
     autoConnect: true,
     timeout: 10000,

@@ -1,10 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
 
-// react-native-web passes unrecognized lowercase tags straight through to ReactDOM.
-const VideoTag: any = 'video';
-const AudioTag: any = 'audio';
-
 type Props = {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
@@ -14,45 +10,45 @@ type Props = {
 // Native audio calls play automatically through the device's audio session once tracks are
 // attached - no view is needed. Native video needs react-native-webrtc's RTCView (not wired here).
 export function CallMedia({ localStream, remoteStream, video }: Props) {
-  const remoteRef = useRef<HTMLVideoElement | null>(null);
+  const remoteRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
   const localRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !remoteRef.current) return;
-    const el = remoteRef.current as any;
-    el.srcObject = remoteStream;
+    const el = remoteRef.current as HTMLAudioElement | HTMLVideoElement;
+    el.srcObject = remoteStream as any;
     el.autoplay = true;
-    el.playsinline = true;
+    if ('playsInline' in el) el.playsInline = true;
     if (remoteStream) {
       console.log('[CallMedia] Remote stream attached, size:', remoteStream.getTracks().length);
-      el.play().catch((error: any) => console.warn('Remote video play failed:', error.message));
+      void el.play().catch((error: any) => console.warn('Remote media play failed:', error?.message || error));
     }
   }, [remoteStream]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !localRef.current) return;
-    const el = localRef.current as any;
-    el.srcObject = localStream;
+    const el = localRef.current as HTMLVideoElement;
+    el.srcObject = localStream as any;
     el.autoplay = true;
     el.muted = true;
-    el.playsinline = true;
+    el.playsInline = true;
     if (localStream) {
       console.log('[CallMedia] Local stream attached, size:', localStream.getTracks().length);
-      el.play().catch((error: any) => console.warn('Local video play failed:', error.message));
+      void el.play().catch((error: any) => console.warn('Local video play failed:', error?.message || error));
     }
   }, [localStream]);
 
   if (Platform.OS !== 'web') return null;
 
   return (
-    <View style={styles.container}>
+    <View pointerEvents="none" style={styles.container}>
       {video ? (
         <>
-          <video ref={remoteRef} style={styles.remoteVideo as any} />
+          <video ref={remoteRef as any} style={styles.remoteVideo as any} />
           <video ref={localRef} style={styles.localVideo as any} />
         </>
       ) : (
-        <audio ref={remoteRef} autoPlay playsInline />
+        <audio ref={remoteRef as any} autoPlay muted={false} />
       )}
     </View>
   );

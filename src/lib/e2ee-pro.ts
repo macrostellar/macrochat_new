@@ -84,14 +84,15 @@ export function generateUserIdentityKeyPair(): UserKeyPair {
 
 /**
  * Generate a new device ephemeral key pair (X25519).
- * This is short-lived and specific to this device.
+ * Ephemeral secret key MUST be an X25519 secret key (32 bytes).
  */
 export function generateDeviceEphemeralKeyPair(deviceId: string, userIdentitySecretKey: string): DeviceKeyPair {
+  // Use box.keyPair() for X25519
   const keypair = nacl.box.keyPair();
   const ephemeralPublicKey = encodeBase64(keypair.publicKey);
   const ephemeralSecretKey = encodeBase64(keypair.secretKey);
 
-  // Sign the ephemeral key with identity key to prove device ownership
+  // Sign the ephemeral key with identity key (Ed25519) to prove device ownership
   const identitySecret = decodeBase64(userIdentitySecretKey);
   const ephemeralPubBuffer = decodeBase64(ephemeralPublicKey);
   const signature = nacl.sign.detached(ephemeralPubBuffer, identitySecret);
@@ -184,15 +185,20 @@ export function computeX3DHInitiator(input: X3DHInitiatorInput): string {
   const peerIdentityPublic = decodeBase64(peerBundle.identityKey);
   const peerEphemeralPublic = decodeBase64(peerBundle.ephemeralKey);
 
+  if (myIdentitySecret.length !== 64) {
+    throw new Error(`Invalid identity secret key length: expected 64 bytes, got ${myIdentitySecret.length}`);
+  }
+  if (myEphemeralSecret.length !== 32) {
+    throw new Error(`Invalid ephemeral secret key length: expected 32 bytes, got ${myEphemeralSecret.length}`);
+  }
+
   // X3DH: DH1 + DH2 + DH3 + DH4
-  // Convert Ed25519 identity keys to X25519 for DH
-  // Ed25519 secret key is 64 bytes, but X25519 only uses the first 32 bytes (seed)
+  // Convert Ed25519 identity secret key (64 bytes) to X25519 seed (32 bytes)
   const myIdentityX25519Secret = nacl.sign.keyPair.fromSecretKey(myIdentitySecret).secretKey.slice(0, 32);
-  // For Ed25519 public -> X25519, use nacl crypto_sign_sk_to_seed equivalent
-  const myIdentityX25519Pub = nacl.box.keyPair.fromSecretKey(myIdentityX25519Secret).publicKey;
   const peerIdentityX25519Pub = convertEd25519PublicToX25519(peerIdentityPublic);
 
-  // DH computations
+  // DH computations using nacl.box.before(publicKey, secretKey)
+  // nacl.box.before expects (32-byte pubKey, 32-byte secretKey)
   const dh1 = nacl.box.before(peerIdentityX25519Pub, myIdentityX25519Secret);
   const dh2 = nacl.box.before(peerEphemeralPublic, myIdentityX25519Secret);
   const dh3 = nacl.box.before(peerIdentityX25519Pub, myEphemeralSecret);
@@ -226,10 +232,15 @@ export function computeX3DHResponder(input: X3DHResponderInput): string {
   const initiatorIdentityPub = decodeBase64(initiatorIdentityPublicKey);
   const initiatorEphemeralPub = decodeBase64(initiatorEphemeralPublicKey);
 
+  if (myIdentitySecret.length !== 64) {
+    throw new Error(`Invalid identity secret key length: expected 64 bytes, got ${myIdentitySecret.length}`);
+  }
+  if (myEphemeralSecret.length !== 32) {
+    throw new Error(`Invalid ephemeral secret key length: expected 32 bytes, got ${myEphemeralSecret.length}`);
+  }
+
   // Convert identity keys
-  // Ed25519 secret key is 64 bytes, but X25519 only uses the first 32 bytes (seed)
   const myIdentityX25519Secret = nacl.sign.keyPair.fromSecretKey(myIdentitySecret).secretKey.slice(0, 32);
-  const myIdentityX25519Pub = nacl.box.keyPair.fromSecretKey(myIdentityX25519Secret).publicKey;
   const initiatorIdentityX25519Pub = convertEd25519PublicToX25519(initiatorIdentityPub);
 
   // DH computations (note: order differs from initiator)
@@ -315,11 +326,9 @@ export function encryptMessageE2EEPro(
   deviceId: string,
   senderIdentityPublicKey: string
 ): { encrypted: EncryptedMessage; newSession: SessionKey } {
-  const { messageKey, newSession } = ratchetChainKey(session);
-
-  // Derive encryption key from message key
-  const messageKeyBuffer = decodeBase64(messageKey);
-  const encryptionKey = messageKeyBuffer.slice(0, 32); // Use first 32 bytes as NaCl key
+  // Derive encryption key from sharedSecret
+  const secretBuffer = decodeBase64(session.sharedSecret);
+  const encryptionKey = secretBuffer.slice(0, 32);
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
 
   // Encrypt the message
@@ -330,11 +339,16 @@ export function encryptMessageE2EEPro(
     version: 'mc-e2ee-v2-pro',
     ciphertext: encodeBase64(ciphertext),
     nonce: encodeBase64(nonce),
-    messageKey,
+    messageKey: session.sharedSecret,
     deviceId,
-    counter: newSession.messageKeyCounter,
+    counter: session.messageKeyCounter + 1,
     timestamp: Date.now(),
     senderIdentityPublicKey,
+  };
+
+  const newSession = {
+    ...session,
+    messageKeyCounter: session.messageKeyCounter + 1,
   };
 
   return { encrypted, newSession };
@@ -365,6 +379,24 @@ export function decryptMessageE2EEPro(
     const plaintext = nacl.secretbox.open(ciphertext, nonce, encryptionKey);
     if (!plaintext) return null;
     return encodeUTF8(plaintext);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decrypt ciphertext directly using a shared secret key.
+ */
+export function decryptMessageWithSharedSecret(
+  ciphertext: string,
+  nonce: string,
+  sharedSecret: string
+): string | null {
+  try {
+    const key = decodeBase64(sharedSecret).slice(0, 32);
+    const opened = nacl.secretbox.open(decodeBase64(ciphertext), decodeBase64(nonce), key);
+    if (!opened) return null;
+    return encodeUTF8(opened);
   } catch {
     return null;
   }

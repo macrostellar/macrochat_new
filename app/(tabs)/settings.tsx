@@ -175,15 +175,6 @@ export default function SettingsScreen() {
           <Ionicons name="chevron-forward" color={colors.muted} size={18} />
         </Pressable>
 
-        <Pressable style={styles.row} onPress={() => router.push('/security/e2ee')}>
-          <View style={styles.itemIcon}><Ionicons name="lock-closed" color={colors.blue} size={20} /></View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.itemTitle}>Message encryption</Text>
-            <Text style={styles.detail}>{e2eeEnabled ? 'Phase 1 E2EE enabled' : 'Manage phase 1 end-to-end encryption'}</Text>
-          </View>
-          <Ionicons name="chevron-forward" color={colors.muted} size={18} />
-        </Pressable>
-
         <Pressable style={styles.reset} onPress={reset}>
           <Ionicons name="refresh" color={colors.danger} size={19} />
           <Text style={styles.resetText}>Reset anonymous identity</Text>

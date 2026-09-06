@@ -103,6 +103,7 @@ export function CallOverlay() {
               <CallMedia localStream={localCallStream} remoteStream={remoteCallStream} video={true} />
             ) : (
               <View style={styles.floatingAvatarArea}>
+                {!activeCall.video && <CallMedia localStream={localCallStream} remoteStream={remoteCallStream} video={false} />}
                 <Avatar name={name} color={avatarColor} size={64} />
               </View>
             )}
@@ -141,6 +142,7 @@ export function CallOverlay() {
         </View>
       ) : (
         <View style={styles.audioStage}>
+          {!activeCall.video && <CallMedia localStream={localCallStream} remoteStream={remoteCallStream} video={false} />}
           <View style={styles.avatarGlowContainer}>
             <Avatar name={name} color={avatarColor} size={110} />
           </View>

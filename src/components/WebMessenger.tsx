@@ -847,7 +847,6 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
           <Pressable accessibilityLabel="Calls" style={styles.railButton} onPress={() => router.push('/calls')}><Ionicons name="call-outline" size={21} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="People" style={styles.railButton} onPress={() => router.push('/people')}><Ionicons name="people-outline" size={22} color={colors.muted} /></Pressable>
         </View>
-        <Pressable accessibilityLabel="Settings" style={styles.railButton} onPress={() => router.push('/settings')}><Ionicons name="settings-outline" size={22} color={colors.muted} /></Pressable>
         <View style={styles.profileAvatar}><Avatar name={profile?.displayName || 'Macro'} color={profile?.avatarColor || colors.blue} size={34} online imageUrl={profile?.avatarUrl} /></View>
       </View>
 

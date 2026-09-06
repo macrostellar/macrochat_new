@@ -63,9 +63,6 @@ function WebRail({ active }: { active: Section | 'chats' }) {
           </Pressable>
         ))}
       </View>
-      <Pressable accessibilityLabel="Settings" style={[styles.railButton, active === 'settings' && styles.railActive]} onPress={() => router.push('/settings')}>
-        <Ionicons name="settings-outline" size={22} color={active === 'settings' ? colors.neon : colors.muted} />
-      </Pressable>
       <View style={styles.profileAvatar}><Avatar name={profile?.displayName || 'Macro'} color={profile?.avatarColor || colors.blue} size={34} online imageUrl={profile?.avatarUrl} /></View>
     </View>
   );

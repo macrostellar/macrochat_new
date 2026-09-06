@@ -66,8 +66,9 @@ export default function ConversationScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string | string[] }>();
   const chatId = Array.isArray(id) ? id[0] : id;
-  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, markRead, refreshChats, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall } = useApp();
+  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, markRead, refreshChats, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall } = useApp();
   const chat = chats.find((item) => item.id === chatId);
+  const e2eeActive = e2eeEnabled || Boolean(e2eePro);
 
   const [text, setText] = useState('');
   const [reply, setReply] = useState<Message | null>(null);
@@ -511,11 +512,10 @@ export default function ConversationScreen() {
         <Pressable style={styles.back} onPress={() => router.back()}><Ionicons name="chevron-back" size={27} color={colors.white} /></Pressable>
         <Avatar name={chat.name} color={chat.avatarColor} size={40} online={chat.online} />
         <View style={styles.person}><Text style={styles.name}>{chat.name}</Text><Text style={[styles.presence, chat.online && { color: colors.neon }, remoteActivity && styles.presenceActive]}>{remoteActivity ? (remoteActivity.state === 'recording' ? 'recording voice note...' : 'typing...') : chat.lastSeen}</Text></View>
-        <Pressable style={styles.action} onPress={() => router.push('/camera')}><Ionicons name="camera-outline" size={22} color={colors.blue} /></Pressable>
         <Pressable style={styles.action} onPress={() => startCall(true)}><Ionicons name="videocam-outline" size={22} color={colors.blue} /></Pressable>
         <Pressable style={styles.action} onPress={() => startCall(false)}><Ionicons name="call-outline" size={21} color={colors.blue} /></Pressable>
       </View>
-      <View style={styles.encryption}><Ionicons name="lock-closed" size={11} color={colors.neon} /><Text style={styles.encryptionText}>Messages are designed for end-to-end encryption</Text></View>
+      <View style={styles.encryption}><Ionicons name={e2eeActive ? 'lock-closed' : 'lock-open-outline'} size={11} color={e2eeActive ? colors.neon : colors.danger} /><Text style={styles.encryptionText}>{e2eeActive ? 'End-to-end encryption enabled' : 'Messages are not end-to-end encrypted'}</Text></View>
       {activeCall?.conversationId === chat.id && (
         <View style={styles.callBanner}>
           <Text style={styles.callBannerText}>{activeCall.incoming ? 'Incoming call' : 'Call in progress'} · {activeCall.video ? 'Video' : 'Audio'} · {activeCall.status}</Text>

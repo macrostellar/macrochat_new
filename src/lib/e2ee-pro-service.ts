@@ -5,7 +5,6 @@
  * Integrates with Supabase and the e2ee-pro crypto library.
  */
 
-import { createClient } from '@supabase/supabase-js';
 import {
   generateUserIdentityKeyPair,
   generateDeviceEphemeralKeyPair,
@@ -16,6 +15,7 @@ import {
   initializeSessionFromSharedSecret,
   encryptMessageE2EEPro,
   decryptMessageE2EEPro,
+  decryptMessageWithSharedSecret,
   computeFingerprint,
   verifyDeviceCertificate,
   type UserKeyPair,
@@ -24,12 +24,9 @@ import {
   type SessionKey,
   type EncryptedMessage,
 } from './e2ee-pro';
+import { supabase as sharedSupabase } from './supabase';
 
-// Assume you have Supabase client configured
-const supabase = createClient(
-  process.env.EXPO_PUBLIC_SUPABASE_URL || '',
-  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || ''
-);
+const supabase = sharedSupabase!;
 
 // ============================================================================
 // E2EE PRO SERVICE
@@ -53,7 +50,7 @@ export class E2EEProService {
 
   /**
    * Initialize E2EE for this user/device.
-   * Loads or creates identity keys, device keys, and publishes key bundle.
+   * Loads or creates identity keys, device keys, publishes key bundle, and loads active session keys.
    */
   async initialize(): Promise<void> {
     try {
@@ -68,10 +65,43 @@ export class E2EEProService {
       // Publish key bundle for other users to initiate sessions
       await this.publishX3DHKeyBundle();
 
+      // Pre-load active session keys from DB
+      await this.loadActiveSessions();
+
       console.log('E2EE Pro initialized successfully');
     } catch (error) {
       console.error('E2EE Pro initialization failed:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Load active sessions from database into memory cache.
+   */
+  async loadActiveSessions(): Promise<void> {
+    try {
+      const { data, error } = await supabase
+        .from('macrochat_session_keys')
+        .select('*')
+        .or(`user_id.eq.${this.userId},peer_user_id.eq.${this.userId}`)
+        .eq('is_active', true);
+
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const peerUserId = row.user_id === this.userId ? row.peer_user_id : row.user_id;
+          const peerDeviceId = row.user_id === this.userId ? row.peer_device_id : row.device_id;
+          const sessionKey = `${peerUserId}:${peerDeviceId}`;
+          this.sessionKeys.set(sessionKey, {
+            sharedSecret: row.shared_secret,
+            chainKey: row.chain_key,
+            messageKeyCounter: row.message_key_counter,
+            createdAt: new Date(row.created_at).getTime(),
+            peerDeviceId,
+          });
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load active sessions:', error);
     }
   }
 
@@ -167,13 +197,19 @@ export class E2EEProService {
 
       if (error) throw error;
 
-      // Return loaded device keys
+      // If loaded from DB, generate fresh in-memory ephemeral keypair for this active device session
+      // (or use existing if valid keypair present)
+      const freshEphemeral = generateDeviceEphemeralKeyPair(
+        this.deviceId,
+        this.userIdentityKeyPair.identitySecretKey
+      );
+
       return {
-        ephemeralPublicKey: data.ephemeral_public_key,
-        ephemeralSecretKey: '', // Not loaded from DB for security (generate new on each session)
+        ephemeralPublicKey: freshEphemeral.ephemeralPublicKey,
+        ephemeralSecretKey: freshEphemeral.ephemeralSecretKey,
         deviceId: data.device_id,
         createdAt: new Date(data.created_at).getTime(),
-        signedKeySignature: data.ephemeral_signature,
+        signedKeySignature: freshEphemeral.signedKeySignature,
       };
     } catch (error) {
       console.error('Failed to load/create device keys:', error);
@@ -434,6 +470,24 @@ export class E2EEProService {
       console.error('Failed to decrypt message:', error);
       return null;
     }
+  }
+
+  /**
+   * Attempt synchronous decryption of ciphertext using cached session keys with peer.
+   */
+  decryptCiphertextSync(
+    ciphertext: string,
+    nonce: string,
+    peerUserId: string
+  ): string | null {
+    if (!ciphertext || !nonce || !peerUserId) return null;
+    for (const [key, session] of this.sessionKeys.entries()) {
+      if (key.startsWith(`${peerUserId}:`)) {
+        const decrypted = decryptMessageWithSharedSecret(ciphertext, nonce, session.sharedSecret);
+        if (decrypted) return decrypted;
+      }
+    }
+    return null;
   }
 
   // ========================================================================

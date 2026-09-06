@@ -38,6 +38,14 @@ if (requireConversationMembership && (!supabaseUrl || !supabaseServiceRoleKey)) 
 function isOriginAllowed(origin) {
   if (!origin) return true;
 
+  try {
+    const { hostname, protocol } = new URL(origin);
+    const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+    if (isLoopback && (protocol === 'http:' || protocol === 'https:')) return true;
+  } catch {
+    return false;
+  }
+
   return allowed.some((pattern) => {
     if (pattern === '*') return true;
 

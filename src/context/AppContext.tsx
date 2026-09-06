@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react';
-import { AppState, Platform } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 import { DEFAULT_PROFILE_AVATARS } from '@/components/Avatar';
 import * as SecureStore from 'expo-secure-store';
 import * as FileSystem from 'expo-file-system';
@@ -901,20 +901,22 @@ export function AppProvider({ children }: PropsWithChildren) {
           const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
           let displayText = mediaMeta.text || row.body;
           if (encrypted) {
-            if (row.encryption_version === 'mc-e2ee-v2-pro' && e2eePro) {
-              // E2EE Pro - try to decrypt with service
-              try {
-                // Note: Full decryption requires X3DH session lookup from DB
-                // For now, mark as encrypted and decrypt on-demand in UI
-                displayText = '[Encrypted with E2EE Pro]';
-              } catch (error) {
-                console.warn('[E2EE Pro] Decryption failed:', error);
-                displayText = '[Unable to decrypt]';
+            let decryptedText: string | null = null;
+            if (row.body_ciphertext && row.body_nonce) {
+              if (e2eePassphrase) {
+                decryptedText = decryptTextWithPassphrase(row.body_ciphertext, row.body_nonce, e2eePassphrase);
               }
-            } else if (e2eePassphrase) {
-              // Phase 1 passphrase-based
-              const decrypted = decryptTextWithPassphrase(row.body_ciphertext!, row.body_nonce!, e2eePassphrase);
-              displayText = decrypted ?? '[Unable to decrypt]';
+              if (!decryptedText && e2eePro) {
+                const peerUserId = row.sender_id === actorUserId ? other?.user_id : row.sender_id;
+                if (peerUserId) {
+                  decryptedText = e2eePro.decryptCiphertextSync(row.body_ciphertext, row.body_nonce, peerUserId);
+                }
+              }
+            }
+            if (decryptedText) {
+              displayText = decryptedText;
+            } else if (row.encryption_version === 'mc-e2ee-v2-pro') {
+              displayText = '[Encrypted with E2EE Pro]';
             } else {
               displayText = '[Encrypted message]';
             }
@@ -1017,19 +1019,23 @@ export function AppProvider({ children }: PropsWithChildren) {
     const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
     let displayText = mediaMeta.text || row.body;
     if (encrypted) {
-      if (row.encryption_version === 'mc-e2ee-v2-pro' && e2eePro) {
-        // E2EE Pro - try to decrypt with service
-        try {
-          // Note: Full decryption requires X3DH session lookup from DB
-          // For now, mark as encrypted and decrypt on-demand in UI
-          displayText = '[Encrypted with E2EE Pro]';
-        } catch (error) {
-          console.warn('[E2EE Pro] Decryption failed:', error);
-          displayText = '[Unable to decrypt]';
+      let decryptedText: string | null = null;
+      if (row.body_ciphertext && row.body_nonce) {
+        if (e2eePassphrase) {
+          decryptedText = decryptTextWithPassphrase(row.body_ciphertext, row.body_nonce, e2eePassphrase);
         }
-      } else if (e2eePassphrase) {
-        // Phase 1 passphrase-based
-        displayText = decryptTextWithPassphrase(row.body_ciphertext!, row.body_nonce!, e2eePassphrase) ?? '[Unable to decrypt]';
+        if (!decryptedText && e2eePro) {
+          const chat = chats.find((c) => c.id === row.conversation_id);
+          const peerUserId = row.sender_id === profile.id ? chat?.participantUserId : row.sender_id;
+          if (peerUserId) {
+            decryptedText = e2eePro.decryptCiphertextSync(row.body_ciphertext, row.body_nonce, peerUserId);
+          }
+        }
+      }
+      if (decryptedText) {
+        displayText = decryptedText;
+      } else if (row.encryption_version === 'mc-e2ee-v2-pro') {
+        displayText = '[Encrypted with E2EE Pro]';
       } else {
         displayText = '[Encrypted message]';
       }
@@ -1070,10 +1076,13 @@ export function AppProvider({ children }: PropsWithChildren) {
       const existing = chat.messages.find((message) =>
         (incoming.clientId && message.clientId === incoming.clientId) || message.id === incoming.id);
       if (existing) {
+        const preservedText = existing.text && !existing.text.startsWith('[Encrypted')
+          ? existing.text
+          : incoming.text;
         return {
           ...chat,
           messages: chat.messages.map((m) => m === existing
-            ? { ...m, ...incoming, clientId: incoming.clientId ?? m.clientId, status: 'sent', mediaUrl: incoming.mediaUrl || m.mediaUrl }
+            ? { ...m, ...incoming, text: preservedText, clientId: incoming.clientId ?? m.clientId, status: 'sent', mediaUrl: incoming.mediaUrl || m.mediaUrl }
             : m),
         };
       }
@@ -1674,17 +1683,21 @@ export function AppProvider({ children }: PropsWithChildren) {
     const payload = text.trim();
     if (!payload) return;
 
+    if (supabase && profile && !e2eePassphrase && !e2eePro) {
+      Alert.alert('Message not sent', 'End-to-end encryption is unavailable. Enable E2EE before sending messages.');
+      return;
+    }
+
     const disappearingSeconds = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
     
     // Try E2EE Pro first, fall back to passphrase
     let encryptedPayload: any = null;
     let isE2EEPro = false;
     
-    if (e2eePro) {
-      isE2EEPro = true;
-      // E2EE Pro encryption will happen after we get recipient ID
-    } else if (e2eePassphrase) {
+    if (e2eePassphrase) {
       encryptedPayload = encryptTextWithPassphrase(payload, e2eePassphrase);
+    } else if (e2eePro) {
+      isE2EEPro = true;
     }
 
     // Immutable client-side ID that never changes, even after the server assigns a UUID
@@ -1724,14 +1737,6 @@ export function AppProvider({ children }: PropsWithChildren) {
 
     if (supabase && profile) {
       const client = supabase;
-      const formattedBody = (options?.textColor || options?.fontStyle || options?.fontFamily)
-        ? JSON.stringify({
-            text: payload,
-            textColor: options?.textColor,
-            fontStyle: options?.fontStyle,
-            fontFamily: options?.fontFamily,
-          })
-        : payload;
 
       client.auth.getSession().then(async ({ data: sessionData }) => {
         const actorUserId = sessionData.session?.user.id ?? profile.id;
@@ -1753,16 +1758,16 @@ export function AppProvider({ children }: PropsWithChildren) {
               finalEncryptionVersion = 'mc-e2ee-v2-pro';
               console.log('[sendMessage] E2EE Pro encryption successful');
             } else {
-              // Peer's X3DH bundle not found - they may not be online or initialized yet
-              console.warn('[sendMessage] Peer X3DH bundle not found, sending unencrypted. Recipient:', recipientUserId);
-              finalEncryptionVersion = undefined;
-              // Message will send as plaintext and show in chat naturally
+              throw new Error('The recipient has no active encryption key. Message was not sent.');
             }
           } catch (error) {
-            console.warn('[sendMessage] E2EE Pro encryption failed, falling back to plaintext:', error);
-            // Fall back to storing unencrypted if E2EE Pro fails
-            finalEncryptionVersion = undefined;
+            console.warn('[sendMessage] E2EE Pro encryption failed. Message was not sent:', error);
+            throw error;
           }
+        }
+
+        if (!finalCiphertext || !finalNonce || !finalEncryptionVersion) {
+          throw new Error('Message encryption could not be verified. Message was not sent.');
         }
         
         const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(replyTo || '');
@@ -1771,7 +1776,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         return client.from('macrochat_messages').insert({
           conversation_id: chatId,
           sender_id: actorUserId,
-          body: finalCiphertext ? '[encrypted]' : formattedBody,
+          body: '[encrypted]',
           kind: 'text',
           body_ciphertext: finalCiphertext,
           body_nonce: finalNonce,
@@ -1808,6 +1813,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       }).catch((error) => {
         console.error('[sendMessage] Unexpected error:', error);
         updateLocalMessageStatus('failed');
+        Alert.alert('Message not sent', error instanceof Error ? error.message : 'End-to-end encryption failed.');
       });
       return;
     }
