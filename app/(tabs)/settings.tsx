@@ -1,4 +1,5 @@
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { useState } from 'react';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
@@ -6,23 +7,31 @@ import { Ionicons } from '@expo/vector-icons';
 import QRCode from 'react-native-qrcode-svg';
 import { Avatar, DEFAULT_PROFILE_AVATARS } from '@/components/Avatar';
 import { Screen } from '@/components/Screen';
+import { SignOutModal } from '@/components/SignOutModal';
 import { WebSettings } from '@/components/WebSections';
 import { useApp } from '@/context/AppContext';
-import { getAccountRecoveryState } from '@/lib/supabase';
+import { copyToClipboard } from '@/lib/id';
 import { colors } from '@/theme/colors';
 
-const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/privacy' | '/(tabs)/settings-e2ee' }[] = [
-  { icon: 'lock-closed-outline', title: 'Encryption', detail: 'View & manage encryption keys', route: '/(tabs)/settings-e2ee' },
+const statusOptions = [
+  { value: 'online', label: 'Online', color: colors.neon },
+  { value: 'busy', label: 'Busy', color: '#FFB84D' },
+  { value: 'away', label: 'Away', color: '#7AC7FF' },
+  { value: 'offline', label: 'Offline', color: '#9CB2CC' },
+] as const;
+
+const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/privacy' | '/security/appearance' }[] = [
   { icon: 'shield-checkmark-outline', title: 'Privacy', detail: 'Typing activity, calls and identity protection', route: '/security/privacy' },
   { icon: 'notifications-outline', title: 'Notifications', detail: 'Messages, groups and calls' },
-  { icon: 'color-palette-outline', title: 'Appearance', detail: 'Dark navy theme' },
-  { icon: 'key-outline', title: 'Linked devices', detail: 'Manage trusted sessions' },
+  { icon: 'color-palette-outline', title: 'Appearance', detail: 'Dark navy theme', route: '/security/appearance' },
   { icon: 'server-outline', title: 'Data and storage', detail: 'Media quality and network usage' },
 ];
 
 export default function SettingsScreen() {
   const { width } = useWindowDimensions();
-  const { profile, backendMode, signOut, mfaAal2, e2eeEnabled, updateProfilePicture } = useApp();
+  const { profile, backendMode, signOut, updateProfilePicture, updateProfileStatus } = useApp();
+  const [showSignOutModal, setShowSignOutModal] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   if (Platform.OS === 'web' && width >= 820) return <WebSettings />;
   if (!profile) return null;
   const qrPayload = `macrochat://add?macroId=${encodeURIComponent(profile.macroId)}`;
@@ -46,36 +55,39 @@ export default function SettingsScreen() {
     }
   };
 
-  const reset = async () => {
-    let recoverable = false;
+  const handleSignOutConfirm = async () => {
     try {
-      recoverable = (await getAccountRecoveryState()).recoverable;
-    } catch {
-      // Use the safer warning when account status cannot be checked.
-    }
+      console.log('[settings] Confirming sign out - closing modal');
+      setShowSignOutModal(false);
+      setIsSigningOut(true);
 
-    Alert.alert(
-      recoverable ? 'Sign out on this device?' : 'Permanently reset identity?',
-      recoverable
-        ? 'You can restore this Macro ID using a connected recovery method.'
-        : 'No email, phone, or Google account is connected. Resetting will permanently lose access to this Macro ID and its chats.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: recoverable ? 'Sign out' : 'Reset permanently',
-          style: 'destructive',
-          onPress: async () => {
-            await signOut();
-            router.replace('/');
-          },
-        },
-      ],
-    );
+      if (Platform.OS === 'web') {
+        console.log('[settings] Redirecting away before clearing identity state');
+        window.location.href = '/';
+      } else {
+        console.log('[settings] Navigating away before clearing identity state');
+        router.replace('/');
+      }
+
+      console.log('[settings] Calling signOut()');
+      await signOut();
+      console.log('[settings] Signed out successfully');
+    } catch (error: any) {
+      console.error('[settings] Sign out error:', error);
+      Alert.alert('Sign out failed', error?.message || 'An error occurred');
+      setIsSigningOut(false);
+      setShowSignOutModal(true);
+    }
+  };
+
+  const handleSignOutCancel = () => {
+    console.log('[settings] Cancelling sign out');
+    setShowSignOutModal(false);
   };
 
   return (
     <Screen>
-      <ScrollView>
+      <ScrollView contentContainerStyle={styles.scrollContent}>
         <Text style={styles.title}>Settings</Text>
 
         <View style={styles.profile}>
@@ -85,14 +97,27 @@ export default function SettingsScreen() {
           <View style={{ flex: 1 }}>
             <Text style={styles.name}>{profile.displayName}</Text>
             <Pressable
-              onPress={async () => {
-                await Clipboard.setStringAsync(profile.macroId);
-                Alert.alert('Copied', profile.macroId);
-              }}
+              onPress={() => copyToClipboard(profile.macroId)}
             >
               <Text style={styles.id}>{profile.macroId}  <Ionicons name="copy-outline" size={13} /></Text>
             </Pressable>
-            <Text style={styles.mode}>{backendMode === 'supabase' ? '● Online mode' : '● Offline mode'}</Text>
+            <Text style={[styles.mode, { color: statusOptions.find((option) => option.value === profile.status)?.color ?? colors.neon }]}>● {statusOptions.find((option) => option.value === profile.status)?.label ?? 'Online'}</Text>
+          </View>
+        </View>
+
+        <View style={styles.statusPicker}>
+          <Text style={styles.avatarTitle}>Status</Text>
+          <View style={styles.statusOptionsRow}>
+            {statusOptions.map((option) => (
+              <Pressable
+                key={option.value}
+                onPress={() => void updateProfileStatus(option.value)}
+                style={[styles.statusOption, profile.status === option.value && styles.statusOptionActive]}
+              >
+                <View style={[styles.statusDot, { backgroundColor: option.color }]} />
+                <Text style={[styles.statusOptionText, profile.status === option.value && styles.statusOptionTextActive]}>{option.label}</Text>
+              </Pressable>
+            ))}
           </View>
         </View>
 
@@ -125,20 +150,14 @@ export default function SettingsScreen() {
           <View style={styles.qrActions}>
             <Pressable
               style={styles.qrActionBtn}
-              onPress={async () => {
-                await Clipboard.setStringAsync(profile.macroId);
-                Alert.alert('Copied', profile.macroId);
-              }}
+              onPress={() => copyToClipboard(profile.macroId, 'Copied ID')}
             >
               <Ionicons name="copy-outline" color={colors.white} size={16} />
               <Text style={styles.qrActionText}>Copy ID</Text>
             </Pressable>
             <Pressable
               style={styles.qrActionBtn}
-              onPress={async () => {
-                await Clipboard.setStringAsync(qrPayload);
-                Alert.alert('Copied', 'QR payload copied to clipboard.');
-              }}
+              onPress={() => copyToClipboard(qrPayload, 'QR payload copied')}
             >
               <Ionicons name="link-outline" color={colors.white} size={16} />
               <Text style={styles.qrActionText}>Copy QR Link</Text>
@@ -170,15 +189,21 @@ export default function SettingsScreen() {
           <View style={styles.itemIcon}><Ionicons name="shield-checkmark" color={colors.neon} size={22} /></View>
           <View style={{ flex: 1 }}>
             <Text style={styles.itemTitle}>Two-factor authentication</Text>
-            <Text style={styles.detail}>{mfaAal2 ? 'Verified (AAL2)' : 'Enroll and verify authenticator code'}</Text>
+            <Text style={styles.detail}>Secure your account with an authenticator code</Text>
           </View>
           <Ionicons name="chevron-forward" color={colors.muted} size={18} />
         </Pressable>
 
-        <Pressable style={styles.reset} onPress={reset}>
+        <Pressable style={styles.reset} onPress={() => setShowSignOutModal(true)} disabled={isSigningOut}>
           <Ionicons name="refresh" color={colors.danger} size={19} />
           <Text style={styles.resetText}>Reset anonymous identity</Text>
         </Pressable>
+        <SignOutModal
+          visible={showSignOutModal}
+          onConfirm={handleSignOutConfirm}
+          onCancel={handleSignOutCancel}
+          isLoading={isSigningOut}
+        />
 
         <Text style={styles.version}>MacroChat MVP · Built for private, fast conversations</Text>
       </ScrollView>
@@ -187,6 +212,7 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
+  scrollContent: { paddingBottom: 100 },
   title: { color: colors.white, fontSize: 32, fontWeight: '900', margin: 20, marginTop: 18 },
   profile: {
     flexDirection: 'row',
@@ -226,7 +252,32 @@ const styles = StyleSheet.create({
   uploadText: { color: colors.white, fontSize: 12, fontWeight: '800' },
   name: { color: colors.white, fontSize: 18, fontWeight: '900' },
   id: { color: colors.blue, fontSize: 12, fontWeight: '700', marginTop: 4 },
-  mode: { color: colors.neon, fontSize: 10, marginTop: 5 },
+  mode: { fontSize: 10, marginTop: 5 },
+  statusPicker: {
+    marginHorizontal: 20,
+    marginBottom: 18,
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: colors.navy800,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  statusOptionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  statusOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.navy900,
+  },
+  statusOptionActive: { borderColor: colors.neon, backgroundColor: 'rgba(57, 255, 20, 0.08)' },
+  statusOptionText: { color: colors.white, fontSize: 11, fontWeight: '700' },
+  statusOptionTextActive: { color: colors.neon },
+  statusDot: { width: 8, height: 8, borderRadius: 99 },
   qrCard: {
     marginHorizontal: 20,
     marginBottom: 12,

@@ -7,7 +7,9 @@ import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { Avatar, DEFAULT_PROFILE_AVATARS } from '@/components/Avatar';
 import { CallMedia } from '@/components/CallMedia';
+import { SignOutModal } from '@/components/SignOutModal';
 import { useApp } from '@/context/AppContext';
+import { copyToClipboard } from '@/lib/id';
 import { colors } from '@/theme/colors';
 import type { Chat } from '@/types';
 
@@ -33,24 +35,24 @@ function callOutcomeLabel(item: { incoming: boolean; outcome: string; durationSe
   return `${item.incoming ? 'Incoming' : 'Outgoing'} \u00b7 ${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-const settingsItems: { id: string; icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/account' | '/security/privacy' | '/security/mfa' | '/security/e2ee' }[] = [
+const settingsItems: { id: string; icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/account' | '/security/privacy' | '/security/notifications' | '/security/appearance' | '/security/storage' | '/security/mfa' }[] = [
   { id: 'account', icon: 'person-circle-outline', title: 'Account and recovery', detail: 'Username-only, email, phone, or Google', route: '/security/account' },
   { id: 'privacy', icon: 'shield-checkmark-outline', title: 'Privacy', detail: 'Typing activity, calls, and identity protection', route: '/security/privacy' },
-  { id: 'notifications', icon: 'notifications-outline', title: 'Notifications', detail: 'Messages, groups, and calls' },
-  { id: 'appearance', icon: 'color-palette-outline', title: 'Appearance', detail: 'MacroChat dark navy theme' },
-  { id: 'devices', icon: 'key-outline', title: 'Linked devices', detail: 'Manage trusted sessions' },
-  { id: 'storage', icon: 'server-outline', title: 'Data and storage', detail: 'Media quality and network usage' },
+  { id: 'notifications', icon: 'notifications-outline', title: 'Notifications', detail: 'Messages, groups, and calls', route: '/security/notifications' },
+  { id: 'appearance', icon: 'color-palette-outline', title: 'Appearance', detail: 'Dark-only text and chat background presets', route: '/security/appearance' },
+  { id: 'storage', icon: 'server-outline', title: 'Data and storage', detail: 'Media quality and network usage', route: '/security/storage' },
   { id: 'mfa', icon: 'shield-checkmark', title: 'Two-factor authentication', detail: 'Authenticator verification', route: '/security/mfa' },
-  { id: 'e2ee', icon: 'lock-closed-outline', title: 'Message encryption', detail: 'Manage end-to-end encryption', route: '/security/e2ee' },
 ];
 
 function WebRail({ active }: { active: Section | 'chats' }) {
-  const { profile } = useApp();
-  const links: { id: Section | 'chats'; icon: keyof typeof Ionicons.glyphMap; route: '/(tabs)' | '/updates' | '/calls' | '/people' }[] = [
+  const { profile, updates } = useApp();
+  const unreadStatusCount = updates.filter((item) => !item.mine && !item.viewed).length;
+  const links: { id: Section | 'chats'; icon: keyof typeof Ionicons.glyphMap; route: '/(tabs)' | '/updates' | '/calls' | '/people' | '/(tabs)/settings' }[] = [
     { id: 'chats', icon: 'chatbubble-ellipses', route: '/(tabs)' },
     { id: 'updates', icon: 'radio-outline', route: '/updates' },
     { id: 'calls', icon: 'call-outline', route: '/calls' },
     { id: 'people', icon: 'people-outline', route: '/people' },
+    { id: 'settings', icon: 'settings-outline', route: '/(tabs)/settings' },
   ];
 
   return (
@@ -60,10 +62,13 @@ function WebRail({ active }: { active: Section | 'chats' }) {
         {links.map((item) => (
           <Pressable key={item.id} accessibilityLabel={item.id} style={[styles.railButton, active === item.id && styles.railActive]} onPress={() => router.push(item.route)}>
             <Ionicons name={item.icon} size={22} color={active === item.id ? colors.neon : colors.muted} />
+            {item.id === 'updates' && unreadStatusCount > 0 && (
+              <View style={styles.tabBadge}><Text style={styles.tabBadgeText}>{unreadStatusCount > 9 ? '9+' : unreadStatusCount}</Text></View>
+            )}
           </Pressable>
         ))}
       </View>
-      <View style={styles.profileAvatar}><Avatar name={profile?.displayName || 'Macro'} color={profile?.avatarColor || colors.blue} size={34} online imageUrl={profile?.avatarUrl} /></View>
+      <Pressable style={styles.profileAvatar} accessibilityLabel="Settings" onPress={() => router.push('/(tabs)/settings')}><Avatar name={profile?.displayName || 'Macro'} color={profile?.avatarColor || colors.blue} size={34} online imageUrl={profile?.avatarUrl} /></Pressable>
     </View>
   );
 }
@@ -513,7 +518,7 @@ export function WebSettingsShell({ activeId, title, subtitle, children }: { acti
         <>
           <Search value={query} onChangeText={setQuery} placeholder="Search settings" />
           <Pressable style={styles.settingsProfile} onPress={() => router.replace('/settings')}>
-            <Avatar name={profile.displayName} color={profile.avatarColor} size={52} online />
+            <Avatar name={profile.displayName} color={profile.avatarColor} size={52} online imageUrl={profile.avatarUrl} />
             <View style={styles.rowCopy}><Text style={styles.rowTitle}>{profile.displayName}</Text><Text style={styles.rowMeta}>{profile.macroId}</Text></View>
           </Pressable>
           <FlatList
@@ -540,10 +545,18 @@ export function WebSettingsShell({ activeId, title, subtitle, children }: { acti
 }
 
 export function WebSettings() {
-  const { profile, backendMode, signOut, updateProfilePicture } = useApp();
+  const { profile, backendMode, signOut, updateProfilePicture, updateProfileStatus } = useApp();
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState('account');
+  const [showSignOutModal, setShowSignOutModal] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   if (!profile) return null;
+  const statusOptions = [
+    { value: 'online', label: 'Online', color: colors.neon },
+    { value: 'busy', label: 'Busy', color: '#FFB84D' },
+    { value: 'away', label: 'Away', color: '#7AC7FF' },
+    { value: 'offline', label: 'Offline', color: '#9CB2CC' },
+  ] as const;
   const filtered = settingsItems.filter((item) => `${item.title} ${item.detail}`.toLowerCase().includes(query.toLowerCase()));
   const selected = settingsItems.find((item) => item.id === selectedId) ?? settingsItems[0];
 
@@ -566,25 +579,39 @@ export function WebSettings() {
     }
   };
 
-  const reset = async () => {
-    const message = 'Sign out of MacroChat on this browser? If no recovery method is connected, you may permanently lose access to this identity.';
-    if (!globalThis.confirm(message)) return;
+  const handleSignOutConfirm = async () => {
     try {
+      console.log('[WebSettings] Confirming sign out - closing modal');
+      setShowSignOutModal(false);
+      setIsSigningOut(true);
+
+      console.log('[WebSettings] Navigating away before clearing identity state');
+      window.location.href = '/';
+
+      console.log('[WebSettings] Calling signOut()');
       await signOut();
-      router.replace('/');
-    } catch (error) {
-      Alert.alert('Sign out failed', error instanceof Error ? error.message : 'Try again.');
+      console.log('[WebSettings] Signed out successfully');
+    } catch (error: any) {
+      console.error('[WebSettings] Sign out error:', error);
+      Alert.alert('Sign out failed', error?.message || 'An error occurred');
+      setIsSigningOut(false);
+      setShowSignOutModal(true);
     }
+  };
+
+  const handleSignOutCancel = () => {
+    console.log('[WebSettings] Cancelling sign out');
+    setShowSignOutModal(false);
   };
 
   return (
     <Workspace
       active="settings" title="Settings" subtitle={`${profile.displayName} · ${backendMode === 'supabase' ? 'Online' : 'Offline'}`}
-      sidebar={<><Search value={query} onChangeText={setQuery} placeholder="Search settings" /><View style={styles.settingsProfile}><Avatar name={profile.displayName} color={profile.avatarColor} size={52} online /><View style={styles.rowCopy}><Text style={styles.rowTitle}>{profile.displayName}</Text><Text style={styles.rowMeta}>{profile.macroId}</Text></View></View><FlatList data={filtered} keyExtractor={(item) => item.id} renderItem={({ item }) => <Pressable style={[styles.settingRow, selected.id === item.id && styles.listRowActive]} onPress={() => { setSelectedId(item.id); if (item.route) router.push(item.route); }}><View style={styles.settingIcon}><Ionicons name={item.icon} size={20} color={colors.blue} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>{item.title}</Text><Text style={styles.rowMeta}>{item.detail}</Text></View><Ionicons name="chevron-forward" size={17} color={colors.muted} /></Pressable>} /></>}
+      sidebar={<><Search value={query} onChangeText={setQuery} placeholder="Search settings" /><View style={styles.settingsProfile}><Avatar name={profile.displayName} color={profile.avatarColor} size={52} online imageUrl={profile.avatarUrl} /><View style={styles.rowCopy}><Text style={styles.rowTitle}>{profile.displayName}</Text><Text style={styles.rowMeta}>{profile.macroId}</Text></View></View><FlatList data={filtered} keyExtractor={(item) => item.id} renderItem={({ item }) => <Pressable style={[styles.settingRow, selected.id === item.id && styles.listRowActive]} onPress={() => { setSelectedId(item.id); if (item.route) router.push(item.route); }}><View style={styles.settingIcon}><Ionicons name={item.icon} size={20} color={colors.blue} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>{item.title}</Text><Text style={styles.rowMeta}>{item.detail}</Text></View><Ionicons name="chevron-forward" size={17} color={colors.muted} /></Pressable>} /></>}
     >
       <ScrollView contentContainerStyle={styles.settingsDetail}>
         <View style={styles.settingsHeading}><View style={styles.largeSettingIcon}><Ionicons name={selected.icon} size={30} color={colors.blue} /></View><View><Text style={styles.detailTitle}>{selected.title}</Text><Text style={styles.detailMeta}>{selected.detail}</Text></View></View>
-        <View style={styles.accountPanel}><Avatar name={profile.displayName} color={profile.avatarColor} size={72} online imageUrl={profile.avatarUrl} /><View style={styles.accountCopy}><Text style={styles.accountName}>{profile.displayName}</Text><Pressable onPress={async () => { await Clipboard.setStringAsync(profile.macroId); Alert.alert('Copied', profile.macroId); }}><Text style={styles.accountId}>{profile.macroId}  <Ionicons name="copy-outline" size={13} /></Text></Pressable><Text style={styles.onlineLabel}>{backendMode === 'supabase' ? '● Online mode' : '● Offline mode'}</Text></View><View style={styles.qr}><QRCode value={`macrochat://add?macroId=${encodeURIComponent(profile.macroId)}`} size={112} color={colors.navy950} backgroundColor={colors.white} /></View></View>
+        <View style={styles.accountPanel}><Avatar name={profile.displayName} color={profile.avatarColor} size={72} online imageUrl={profile.avatarUrl} /><View style={styles.accountCopy}><Text style={styles.accountName}>{profile.displayName}</Text><Pressable onPress={() => copyToClipboard(profile.macroId)}><Text style={styles.accountId}>{profile.macroId}  <Ionicons name="copy-outline" size={13} /></Text></Pressable><Text style={[styles.onlineLabel, { color: statusOptions.find((option) => option.value === profile.status)?.color ?? colors.neon }]}>{`● ${statusOptions.find((option) => option.value === profile.status)?.label ?? 'Online'}`}</Text></View><View style={styles.qr}><QRCode value={`macrochat://add?macroId=${encodeURIComponent(profile.macroId)}`} size={112} color={colors.navy950} backgroundColor={colors.white} /></View></View>
 
         <View style={styles.avatarPickerPanel}>
           <Text style={styles.avatarPickerTitle}>Profile photo</Text>
@@ -601,11 +628,29 @@ export function WebSettings() {
           </Pressable>
         </View>
 
+        <View style={styles.statusCard}>
+          <Text style={styles.avatarPickerTitle}>Availability</Text>
+          <View style={styles.statusRow}>
+            {statusOptions.map((option) => (
+              <Pressable key={option.value} onPress={() => void updateProfileStatus(option.value)} style={[styles.statusChip, profile.status === option.value && styles.statusChipActive]}>
+                <View style={[styles.statusDot, { backgroundColor: option.color }]} />
+                <Text style={[styles.statusChipText, profile.status === option.value && styles.statusChipTextActive]}>{option.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
         <Pressable style={styles.openSetting} onPress={() => selected.route && router.push(selected.route)} disabled={!selected.route}><Text style={styles.openSettingText}>{selected.route ? `Open ${selected.title}` : 'Configuration coming soon'}</Text><Ionicons name="arrow-forward" size={18} color={selected.route ? colors.navy950 : colors.muted} /></Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Sign out or reset identity" style={styles.reset} onPress={reset}><Ionicons name="log-out-outline" size={19} color={colors.danger} /><Text style={styles.resetText}>Sign out or reset identity</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Sign out or reset identity" style={styles.reset} onPress={() => setShowSignOutModal(true)} disabled={isSigningOut}><Ionicons name="log-out-outline" size={19} color={colors.danger} /><Text style={styles.resetText}>Sign out or reset identity</Text></Pressable>
       </ScrollView>
+      <SignOutModal
+        visible={showSignOutModal}
+        onConfirm={handleSignOutConfirm}
+        onCancel={handleSignOutCancel}
+        isLoading={isSigningOut}
+      />
     </Workspace>
-  );
+  )
 }
 
 const styles = StyleSheet.create({
@@ -614,8 +659,10 @@ const styles = StyleSheet.create({
   logo: { width: 38, height: 38, borderRadius: 8, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' },
   logoText: { color: colors.navy950, fontSize: 20, fontWeight: '900' },
   railNav: { flex: 1, paddingTop: 28, gap: 8 },
-  railButton: { width: 44, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  railButton: { width: 44, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', position: 'relative' },
   railActive: { backgroundColor: colors.navy800, borderLeftWidth: 2, borderLeftColor: colors.neon },
+  tabBadge: { position: 'absolute', right: -2, top: -2, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  tabBadgeText: { color: colors.white, fontSize: 9, fontWeight: '900' },
   profileAvatar: { marginTop: 10 },
   sidebar: { width: 390, maxWidth: '34%', backgroundColor: colors.navy900, borderRightWidth: 1, borderRightColor: colors.border },
   sidebarHeader: { height: 82, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -743,7 +790,14 @@ const styles = StyleSheet.create({
   avatarPickerTitle: { color: colors.white, fontSize: 13, fontWeight: '800', marginBottom: 10 },
   defaultAvatarGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   avatarChoice: { width: 46, height: 46, borderRadius: 23, overflow: 'hidden', borderWidth: 1, borderColor: 'transparent' },
-  avatarChoiceActive: { borderColor: colors.neon, shadowColor: colors.neon, shadowOpacity: 0.5, shadowRadius: 8, shadowOffset: { width: 0, height: 0 } },
+  avatarChoiceActive: { borderColor: colors.neon, boxShadow: '0 0 8px rgba(103, 211, 255, 0.5)' },
+  statusCard: { marginTop: 22, borderWidth: 1, borderColor: colors.border, borderRadius: 12, backgroundColor: colors.navy900, padding: 14 },
+  statusRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 6 },
+  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800 },
+  statusChipActive: { borderColor: colors.neon, backgroundColor: 'rgba(57, 255, 20, 0.08)' },
+  statusChipText: { color: colors.white, fontSize: 11, fontWeight: '700' },
+  statusChipTextActive: { color: colors.neon },
+  statusDot: { width: 8, height: 8, borderRadius: 99 },
   uploadButton: { marginTop: 12, height: 38, borderRadius: 8, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   uploadButtonText: { color: colors.white, fontWeight: '700', fontSize: 12 },
   reset: { marginTop: 14, height: 48, borderRadius: 8, borderWidth: 1, borderColor: '#5C2940', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },

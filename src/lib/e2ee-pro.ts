@@ -402,6 +402,24 @@ export function decryptMessageWithSharedSecret(
   }
 }
 
+/**
+ * Decrypt ciphertext directly using self-identity secret key.
+ */
+export function decryptMessageWithSelfIdentityKey(
+  ciphertext: string,
+  nonce: string,
+  identitySecretKey: string
+): string | null {
+  try {
+    const selfKey = nacl.hash(decodeBase64(identitySecretKey)).slice(0, 32);
+    const opened = nacl.secretbox.open(decodeBase64(ciphertext), decodeBase64(nonce), selfKey);
+    if (!opened) return null;
+    return encodeUTF8(opened);
+  } catch {
+    return null;
+  }
+}
+
 // ============================================================================
 // DEVICE VERIFICATION & FINGERPRINTS
 // ============================================================================

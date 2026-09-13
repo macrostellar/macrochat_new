@@ -6,6 +6,7 @@ export type PrivacySettings = {
   shareTypingActivity: boolean;
   allowIncomingCalls: boolean;
   readReceipts: boolean;
+  showDeviceStatus: boolean;
   defaultMessageTtlSeconds: number | null;
 };
 
@@ -20,6 +21,7 @@ export const defaultPrivacySettings: PrivacySettings = {
   shareTypingActivity: true,
   allowIncomingCalls: true,
   readReceipts: true,
+  showDeviceStatus: true,
   defaultMessageTtlSeconds: null,
 };
 

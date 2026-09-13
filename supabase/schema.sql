@@ -40,7 +40,7 @@ create table if not exists public.macrochat_messages (
   body_ciphertext text,
   body_nonce text,
   encryption_version text,
-  kind text not null default 'text' check (kind in ('text', 'image', 'file', 'voice', 'system')),
+  kind text not null default 'text' check (kind in ('text', 'image', 'video', 'file', 'voice', 'system', 'call')),
   media_path text,
   reply_to uuid references public.macrochat_messages(id) on delete set null,
   created_at timestamptz not null default now(),
@@ -103,7 +103,8 @@ for each row
 execute function public.macrochat_validate_required_e2ee_message();
 
 drop policy if exists "users read own profile" on public.macrochat_profiles;
-create policy "users read own profile" on public.macrochat_profiles for select to authenticated using (id = auth.uid());
+drop policy if exists "authenticated read profiles" on public.macrochat_profiles;
+create policy "authenticated read profiles" on public.macrochat_profiles for select to authenticated using (true);
 drop policy if exists "users create own profile" on public.macrochat_profiles;
 create policy "users create own profile" on public.macrochat_profiles for insert to authenticated with check (id = auth.uid());
 drop policy if exists "users update own profile" on public.macrochat_profiles;

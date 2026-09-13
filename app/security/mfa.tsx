@@ -70,7 +70,7 @@ export default function MFAScreen() {
       setCode('');
       await refreshSecurityState();
       await loadFactors();
-      setNotice({ error: false, text: 'Authenticator verified. This session now has AAL2 protection.' });
+      setNotice({ error: false, text: 'Authenticator verified. This session now has stronger 2FA protection.' });
     } catch (error) {
       setNotice({ error: true, text: describeAuthFailure(error, 'mfa') });
     } finally {
@@ -114,8 +114,8 @@ export default function MFAScreen() {
 
         <View style={styles.statusCard}>
           <Text style={styles.statusLabel}>Session Assurance</Text>
-          <Text style={[styles.statusValue, { color: mfaAal2 ? colors.neon : colors.danger }]}>{mfaAal2 ? 'AAL2 Verified' : 'AAL1 (Not Verified)'}</Text>
-          <Text style={styles.helper}>AAL2 is required once MFA RLS enforcement is active.</Text>
+          <Text style={[styles.statusValue, { color: mfaAal2 ? colors.neon : colors.danger }]}>{mfaAal2 ? 'Verified' : 'Not verified'}</Text>
+          <Text style={styles.helper}>Secure your account by verifying your authenticator app.</Text>
         </View>
 
         {notice && <View style={[styles.notice, { borderColor: notice.error ? colors.danger : colors.neon }]}><Ionicons name={notice.error ? 'alert-circle-outline' : 'checkmark-circle-outline'} size={20} color={notice.error ? colors.danger : colors.neon} /><Text style={styles.noticeText}>{notice.text}</Text></View>}

@@ -82,7 +82,7 @@ export function CallOverlay() {
   // FLOATING MODE
   if (callMode === 'floating') {
     return (
-      <View style={styles.floatingContainer} pointerEvents="box-none">
+      <View style={[styles.floatingContainer, { pointerEvents: 'box-none' }]}>
         <View style={styles.floatingWindow}>
           <View style={styles.floatingHeader}>
             <Avatar name={name} color={avatarColor} size={32} />
@@ -152,7 +152,7 @@ export function CallOverlay() {
       )}
 
       {/* Top Header Overlay */}
-      <View style={styles.headerOverlay} pointerEvents="box-none">
+      <View style={[styles.headerOverlay, { pointerEvents: 'box-none' }]}>
         <View style={styles.headerContent}>
           <Avatar name={name} color={avatarColor} size={42} />
           <View style={{ flex: 1, marginLeft: 12 }}>
@@ -166,7 +166,7 @@ export function CallOverlay() {
       </View>
 
       {/* Bottom Controls Overlay */}
-      <View style={styles.bottomOverlay} pointerEvents="box-none">
+      <View style={[styles.bottomOverlay, { pointerEvents: 'box-none' }]}>
         <View style={styles.controlsBar}>
           {isIncomingRinging && (
             <Pressable style={[styles.controlBtnLarge, styles.successBg]} onPress={acceptIncomingCall}>

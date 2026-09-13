@@ -41,7 +41,7 @@ export function CallMedia({ localStream, remoteStream, video }: Props) {
   if (Platform.OS !== 'web') return null;
 
   return (
-    <View pointerEvents="none" style={styles.container}>
+    <View style={[styles.container, { pointerEvents: 'none' }]}>
       {video ? (
         <>
           <video ref={remoteRef as any} style={styles.remoteVideo as any} />

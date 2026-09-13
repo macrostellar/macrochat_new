@@ -25,16 +25,16 @@ export default function WelcomeScreen() {
       toValue: 1,
       duration: 700,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: false,
     }).start();
 
     const pulseLoop = Animated.loop(Animated.sequence([
-      Animated.timing(pulse, { toValue: 1, duration: 1800, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 0.65, duration: 1800, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 1, duration: 1800, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+      Animated.timing(pulse, { toValue: 0.65, duration: 1800, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
     ]));
     const ctaLoop = Animated.loop(Animated.sequence([
-      Animated.timing(ctaFloat, { toValue: 1, duration: 1600, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      Animated.timing(ctaFloat, { toValue: 0, duration: 1600, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(ctaFloat, { toValue: 1, duration: 1600, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+      Animated.timing(ctaFloat, { toValue: 0, duration: 1600, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
     ]));
     pulseLoop.start();
     ctaLoop.start();
@@ -82,6 +82,15 @@ export default function WelcomeScreen() {
     }
   };
 
+  const openRppLink = () => {
+    if (Platform.OS === 'web') {
+      window.open('https://rppnet.com', '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    // no-op on native as this screen is web-first
+  };
+
   if (loading || profile) return <View style={styles.loading}><ActivityIndicator color={colors.blue} /></View>;
 
   const entryStyle = {
@@ -97,65 +106,207 @@ export default function WelcomeScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={styles.page} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={Platform.OS === 'ios' ? 14 : 28}>
+    <KeyboardAvoidingView
+      style={styles.page}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 14 : 0}
+    >
       <QuantumField />
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        <Animated.View style={[styles.hero, entryStyle]}>
-          <Animated.View style={[styles.logoHalo, { opacity: pulse }]} />
-          <Image source={require('../assets/images/macrostellar-logo.png')} style={styles.logoImage} resizeMode="contain" />
-        </Animated.View>
-        <Animated.View style={entryStyle}>
-          <Text style={styles.brand}>MACROSTELLAR // MACROCHAT</Text>
-          <Text style={styles.title}>Quantum private messaging.{`\n`}Signal-grade speed.</Text>
-          <Text style={styles.body}>Create an anonymous Macro ID with zero email and zero phone requirements.</Text>
-          <Text style={styles.label}>DISPLAY NAME</Text>
-          <TextInput
-            value={name} onChangeText={setName} placeholder="How should people know you?"
-            placeholderTextColor={colors.muted} style={styles.input} autoCapitalize="words"
-            returnKeyType="done" onSubmitEditing={createIdentity} maxLength={32}
-          />
-          <Animated.View style={{ transform: [{ translateY: ctaFloat.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }] }}>
-            <Pressable style={({ pressed }) => [styles.button, pressed && { opacity: 0.86, transform: [{ scale: 0.99 }] }]} onPress={createIdentity} disabled={submitting}>
-              {submitting ? <ActivityIndicator color={colors.black} /> : <><Text style={styles.buttonText}>Create anonymous ID</Text><Ionicons name="arrow-forward" size={20} color={colors.black} /></>}
-            </Pressable>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.content}>
+          <Animated.View style={[styles.shell, entryStyle]}>
+            <View style={styles.card}>
+              <View style={styles.headerGroup}>
+                <Animated.View style={[styles.logoHalo, { opacity: pulse }]} />
+                <Image source={require('../assets/images/macrostellar-logo.png')} style={styles.logoImage} resizeMode="contain" />
+              </View>
+
+              <Text style={styles.brand}>MACROCHAT - BY MACROSTELLAR</Text>
+              <Text style={styles.title}>Quantum private messaging.{`\n`}Signal-grade speed.</Text>
+              <Text style={styles.body}>Create an anonymous Macro ID with zero email and zero phone requirements.</Text>
+
+              <View style={styles.formWrap}>
+                <Text style={styles.label}>DISPLAY NAME</Text>
+                <TextInput
+                  value={name} onChangeText={setName} placeholder="How should people know you?"
+                  placeholderTextColor={colors.muted} style={styles.input} autoCapitalize="words"
+                  returnKeyType="done" onSubmitEditing={createIdentity} maxLength={32}
+                />
+
+                <Animated.View style={{ transform: [{ translateY: ctaFloat.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }) }] }}>
+                  <Pressable style={({ pressed }) => [styles.button, pressed && { opacity: 0.9, transform: [{ scale: 0.99 }] }]} onPress={createIdentity} disabled={submitting}>
+                    {submitting ? <ActivityIndicator color={colors.black} /> : <><Text style={styles.buttonText}>Create anonymous ID</Text><Ionicons name="arrow-forward" size={20} color={colors.black} /></>}
+                  </Pressable>
+                </Animated.View>
+
+                <Pressable style={({ pressed }) => [styles.googleButton, pressed && { opacity: 0.9 }]} onPress={continueWithGoogle} disabled={googleLoading}>
+                  {googleLoading
+                    ? <ActivityIndicator color={colors.white} />
+                    : <>
+                      <Ionicons name="logo-google" size={18} color={colors.white} />
+                      <Text style={styles.googleButtonText}>Continue with Google</Text>
+                    </>}
+                </Pressable>
+
+                <Pressable style={styles.recoverButton} onPress={() => router.push('/recover-account')}>
+                  <Ionicons name="key-outline" size={17} color={colors.blue} />
+                  <Text style={styles.recoverButtonText}>Recover existing account</Text>
+                </Pressable>
+
+                <View style={styles.security}><Ionicons name="shield-checkmark" color={colors.neon} size={16} /><Text style={styles.securityText}>Secure local identity · {backendMode === 'demo' ? 'Offline mode' : 'Online mode'}</Text></View>
+              </View>
+            </View>
           </Animated.View>
-          <Pressable style={({ pressed }) => [styles.googleButton, pressed && { opacity: 0.86 }]} onPress={continueWithGoogle} disabled={googleLoading}>
-            {googleLoading
-              ? <ActivityIndicator color={colors.white} />
-              : <>
-                <Ionicons name="logo-google" size={18} color={colors.white} />
-                <Text style={styles.googleButtonText}>Continue with Google</Text>
-              </>}
-          </Pressable>
-          <Pressable style={styles.recoverButton} onPress={() => router.push('/recover-account')}>
-            <Ionicons name="key-outline" size={17} color={colors.blue} />
-            <Text style={styles.recoverButtonText}>Recover existing account</Text>
-          </Pressable>
-          <View style={styles.security}><Ionicons name="shield-checkmark" color={colors.neon} size={16} /><Text style={styles.securityText}>Secure local identity · {backendMode === 'demo' ? 'Offline mode' : 'Online mode'}</Text></View>
-        </Animated.View>
+        </View>
+
+        <Text style={styles.footer}>
+          2026: Copyright © 2019-2025{' '}
+          <Text style={styles.footerLink} onPress={openRppLink}>RPP Net.com</Text>
+          {' '}– All rights reserved | Developed by{' '}
+          <Text style={styles.footerBrand} onPress={openRppLink}>RPP TECHNOLOGY</Text>
+        </Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, backgroundColor: colors.navy950, overflow: 'hidden' },
-  content: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 28, paddingTop: 46, paddingBottom: 42 },
+  page: {
+    flex: 1,
+    minHeight: '100%',
+    backgroundColor: colors.navy950,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    minHeight: '100%',
+    paddingBottom: 18,
+  },
+  content: {
+    flex: 1,
+    minHeight: 560,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 10,
+  },
   loading: { flex: 1, backgroundColor: colors.navy950, alignItems: 'center', justifyContent: 'center' },
-  hero: { alignItems: 'center', marginBottom: 18 },
-  logoHalo: { position: 'absolute', width: 126, height: 126, borderRadius: 63, backgroundColor: colors.glowBlue, top: -8 },
-  logoImage: { width: 108, height: 108, marginBottom: 12 },
-  brand: { color: colors.blue, fontWeight: '900', letterSpacing: 2.5, marginBottom: 18, fontSize: 11 },
-  title: { color: colors.white, fontSize: 33, lineHeight: 41, fontWeight: '800', letterSpacing: -0.8 },
-  body: { color: colors.muted, fontSize: 16, lineHeight: 24, marginTop: 16, marginBottom: 34 },
-  label: { color: colors.blue, fontWeight: '800', fontSize: 11, letterSpacing: 1.4, marginBottom: 9 },
-  input: { color: colors.white, backgroundColor: colors.navy800, borderColor: colors.border, borderWidth: 1, borderRadius: 16, paddingHorizontal: 18, height: 58, fontSize: 16 },
-  button: { height: 58, borderRadius: 16, backgroundColor: colors.neon, marginTop: 14, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 10 },
+  shell: { width: '100%', alignItems: 'center' },
+  card: {
+    width: '100%',
+    maxWidth: 760,
+    borderRadius: 28,
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 18,
+    backgroundColor: 'rgba(9, 20, 31, 0.78)',
+    borderWidth: 1,
+    borderColor: 'rgba(120, 204, 255, 0.18)',
+    boxShadow: '0 10px 22px rgba(103, 211, 255, 0.18)',
+  },
+  headerGroup: { alignItems: 'center', marginBottom: 12 },
+  logoHalo: { position: 'absolute', width: 115, height: 115, borderRadius: 63, backgroundColor: 'rgba(0, 214, 255, 0.12)', top: -10 },
+  logoImage: { width: 98, height: 98, marginBottom: 8 },
+  brand: { color: colors.blue, fontWeight: '900', letterSpacing: 2.2, marginBottom: 14, fontSize: 12, textAlign: 'center' },
+  title: {
+    color: colors.white,
+    fontSize: Platform.OS === 'web' ? 32 : 28,
+    lineHeight: Platform.OS === 'web' ? 38 : 34,
+    fontWeight: '800',
+    letterSpacing: -0.9,
+    textAlign: 'center',
+  },
+  body: {
+    color: colors.muted,
+    fontSize: 15,
+    lineHeight: 22,
+    marginTop: 12,
+    marginBottom: 22,
+    textAlign: 'center',
+    maxWidth: 560,
+    alignSelf: 'center',
+  },
+  formWrap: { width: '100%', maxWidth: 420, alignSelf: 'center', marginTop: 6 },
+  label: { color: colors.blue, fontWeight: '800', fontSize: 11, letterSpacing: 1.4, marginBottom: 8, marginTop: 6 },
+  input: {
+    color: colors.white,
+    backgroundColor: 'rgba(18, 33, 48, 0.9)',
+    borderColor: 'rgba(120, 204, 255, 0.18)',
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    height: 52,
+    fontSize: 15,
+    marginBottom: 14,
+    width: '100%',
+    alignSelf: 'center',
+  },
+  button: {
+    height: 56,
+    borderRadius: 14,
+    backgroundColor: colors.neon,
+    marginTop: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
+    boxShadow: '0 0 16px rgba(109, 245, 194, 0.35)',
+  },
   buttonText: { color: colors.black, fontSize: 16, fontWeight: '900' },
-  googleButton: { height: 54, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, marginTop: 10, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 9 },
-  googleButtonText: { color: colors.white, fontSize: 15, fontWeight: '800' },
-  recoverButton: { height: 48, marginTop: 6, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
-  recoverButtonText: { color: colors.blue, fontSize: 14, fontWeight: '800' },
-  security: { marginTop: 22, flexDirection: 'row', alignItems: 'center', gap: 7, justifyContent: 'center' },
+  googleButton: {
+    height: 50,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 204, 255, 0.18)',
+    backgroundColor: 'rgba(18, 33, 48, 0.9)',
+    marginTop: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 9,
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
+  },
+  googleButtonText: { color: colors.white, fontSize: 14, fontWeight: '800' },
+  recoverButton: {
+    height: 42,
+    marginTop: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    alignSelf: 'center',
+  },
+  recoverButtonText: { color: colors.blue, fontSize: 13, fontWeight: '800' },
+  security: { marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 7, justifyContent: 'center' },
   securityText: { color: colors.muted, fontSize: 12 },
+  footer: {
+    textAlign: 'center',
+    color: 'rgba(181, 199, 219, 0.72)',
+    fontSize: 8,
+    letterSpacing: 0.2,
+    fontWeight: '300',
+    paddingHorizontal: 18,
+    paddingBottom: 8,
+    marginTop: 10,
+  },
+  footerLink: {
+    color: '#9be9d1',
+    fontWeight: '700',
+    textDecorationLine: 'underline',
+  },
+  footerBrand: {
+    color: '#d5f6ff',
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textDecorationLine: 'underline',
+  },
 });

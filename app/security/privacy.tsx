@@ -21,11 +21,12 @@ function PrivacyToggle({ icon, title, detail, value, onChange }: { icon: keyof t
 export default function PrivacyScreen() {
   const { width } = useWindowDimensions();
   const router = useRouter();
-  const { chats, privacySettings, blockedContacts, updatePrivacySetting, blockContact, unblockContact } = useApp();
+  const { chats, privacySettings, blockedContacts, updatePrivacySetting, blockContact, unblockContact, fakeDeviceStatus, updateFakeDeviceStatus } = useApp();
   const [notice, setNotice] = useState<{ error: boolean; text: string } | null>(null);
   const directContacts = chats.filter((chat) => !chat.isGroup && chat.participantUserId);
   const timerOptions = [
     { label: 'Off', value: null },
+    { label: '1 minute', value: 60 },
     { label: '1 hour', value: 3600 },
     { label: '24 hours', value: 86400 },
     { label: '7 days', value: 604800 },
@@ -67,6 +68,37 @@ export default function PrivacyScreen() {
       {notice && <View style={[styles.notice, { borderColor: notice.error ? colors.danger : colors.neon }]}><Ionicons name={notice.error ? 'alert-circle-outline' : 'checkmark-circle-outline'} size={20} color={notice.error ? colors.danger : colors.neon} /><Text style={styles.noticeText}>{notice.text}</Text></View>}
       <PrivacyToggle icon="checkmark-done-outline" title="Read receipts" detail="Let direct-chat senders see when you have read their messages." value={privacySettings.readReceipts} onChange={(value) => void saveSetting('readReceipts', value)} />
       <PrivacyToggle icon="create-outline" title="Share typing activity" detail="Let people in the open chat see when you are typing or recording." value={privacySettings.shareTypingActivity} onChange={(value) => void saveSetting('shareTypingActivity', value)} />
+      <PrivacyToggle icon="phone-portrait-outline" title="Show device status" detail="Let people see whether you are online from mobile, desktop, or web." value={privacySettings.showDeviceStatus} onChange={(value) => void saveSetting('showDeviceStatus', value)} />
+      {privacySettings.showDeviceStatus && (
+        <View style={styles.deviceStatusOptions}>
+          <Text style={styles.optionLabel}>Appear as:</Text>
+          <View style={styles.deviceGrid}>
+            {(['mobile', 'desktop', 'web'] as const).map((device) => (
+              <Pressable
+                key={device}
+                accessibilityRole="button"
+                style={[styles.deviceChip, fakeDeviceStatus === device && styles.deviceChipActive]}
+                onPress={() => {
+                  const newStatus = fakeDeviceStatus === device ? null : device;
+                  void updateFakeDeviceStatus(newStatus);
+                }}
+              >
+                <Ionicons
+                  name={device === 'mobile' ? 'phone-portrait' : device === 'desktop' ? 'laptop' : 'globe'}
+                  size={16}
+                  color={fakeDeviceStatus === device ? colors.navy950 : colors.white}
+                />
+                <Text style={[styles.deviceChipText, fakeDeviceStatus === device && styles.deviceChipTextActive]}>
+                  {device.charAt(0).toUpperCase() + device.slice(1)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={styles.deviceHint}>
+            {fakeDeviceStatus ? `Contacts will see you as using ${fakeDeviceStatus}` : 'Show your actual device type'}
+          </Text>
+        </View>
+      )}
       <PrivacyToggle icon="call-outline" title="Allow incoming calls" detail="When disabled, new audio and video calls are rejected automatically." value={privacySettings.allowIncomingCalls} onChange={(value) => void saveSetting('allowIncomingCalls', value)} />
 
       <Text style={styles.section}>DISAPPEARING MESSAGES</Text>
@@ -106,6 +138,14 @@ const styles = StyleSheet.create({
   intro: { color: colors.muted, fontSize: 12, lineHeight: 18, marginBottom: 10 },
   notice: { borderWidth: 1, padding: 12, marginBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 8 },
   noticeText: { color: colors.white, fontSize: 12, lineHeight: 18, flex: 1 },
+  deviceStatusOptions: { marginLeft: 50, marginTop: 10, marginBottom: 16, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  optionLabel: { color: colors.muted, fontSize: 11, fontWeight: '600', marginBottom: 8 },
+  deviceGrid: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+  deviceChip: { flex: 1, height: 40, borderRadius: 8, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 10 },
+  deviceChipActive: { backgroundColor: colors.neon, borderColor: colors.neon },
+  deviceChipText: { color: colors.white, fontSize: 12, fontWeight: '700' },
+  deviceChipTextActive: { color: colors.navy950 },
+  deviceHint: { color: colors.muted, fontSize: 11, lineHeight: 16 },
   timerGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   timerOption: { minWidth: 88, height: 40, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   timerActive: { backgroundColor: colors.blue, borderColor: colors.blue },

@@ -1,12 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, Image, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, Dimensions, FlatList, Image, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Swipeable } from 'react-native-gesture-handler';
 import { router } from 'expo-router';
+import { Video, ResizeMode } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { Avatar } from '@/components/Avatar';
+import { AmbientQuantumField } from '@/components/AmbientQuantumField';
+import { MessageTimerBorder } from '@/components/MessageTimerBorder';
+import { VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
 import { useApp } from '@/context/AppContext';
+import { STICKER_LIST } from '@/lib/stickers';
 import { colors } from '@/theme/colors';
 import type { Chat, Message } from '@/types';
+
+function TypingIndicator() {
+  const [dots, setDots] = useState(1);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDots((prev) => (prev < 3 ? prev + 1 : 1));
+    }, 400);
+    return () => clearInterval(interval);
+  }, []);
+  
+  return <Text style={{ letterSpacing: 1 }}>typing{'.'.repeat(dots)}</Text>;
+}
+
+function formatClipDuration(ms?: number) {
+  const total = Math.max(0, Math.round((ms ?? 0) / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
 
 function chatTime(iso: string) {
   const date = new Date(iso);
@@ -26,6 +51,18 @@ function MessageTicks({ status }: { status: Message['status'] }) {
 }
 
 const EMOJI_LIST = ['👍', '❤️', '😂', '😮', '😢', '😡', '🔥', '✨', '🎉', '🚀', '👋', '🙏', '💯', '💩', '📌', '⚡', '🌟', '🍕', '☕', '🎈'];
+
+function deviceIcon(device?: 'mobile' | 'desktop' | 'web'): keyof typeof Ionicons.glyphMap {
+  if (device === 'mobile') return 'phone-portrait-outline';
+  if (device === 'desktop') return 'laptop-outline';
+  return 'globe-outline';
+}
+
+function deviceLabel(device?: 'mobile' | 'desktop' | 'web') {
+  if (device === 'mobile') return 'mobile';
+  if (device === 'desktop') return 'desktop';
+  return 'web';
+}
 const FONT_FAMILIES = [
   { label: 'Default', value: 'system-ui, -apple-system, sans-serif' },
   { label: 'Montserrat', value: 'Montserrat, sans-serif' },
@@ -38,6 +75,7 @@ const TEXT_COLORS = [colors.white, '#FF6B9D', '#C44569', '#F8B195', '#F67035', '
 function expiryLabel(expiresAt: string) {
   const remaining = new Date(expiresAt).getTime() - Date.now();
   if (remaining <= 0) return 'expired';
+  if (remaining < 60 * 1000) return `${Math.ceil(remaining / 1000)}s`;
   if (remaining < 60 * 60 * 1000) return `${Math.ceil(remaining / 60000)}m`;
   if (remaining < 24 * 60 * 60 * 1000) return `${Math.ceil(remaining / 3600000)}h`;
   return `${Math.ceil(remaining / 86400000)}d`;
@@ -165,6 +203,16 @@ function VoiceNoteBubble({ item }: { item: Message }) {
 }
 
 function Conversation({ chat }: { chat: Chat }) {
+  const [windowWidth, setWindowWidth] = useState(() => Dimensions.get('window').width);
+  const isMobile = windowWidth < 820;
+
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowWidth(Dimensions.get('window').width);
+    };
+    const subscription = Dimensions.addEventListener('change', handleResize);
+    return () => subscription?.remove();
+  }, []);
   const {
     chats,
     activityByChat,
@@ -181,9 +229,12 @@ function Conversation({ chat }: { chat: Chat }) {
     clearChat,
     blockContact,
     deleteMessage,
+    toggleMessagePin,
+    toggleMessageStar,
     postMessageReaction,
     setChatDisappearingTimer,
     messageReactions,
+    appearanceSettings,
   } = useApp();
 
   const [text, setText] = useState('');
@@ -194,27 +245,150 @@ function Conversation({ chat }: { chat: Chat }) {
   const [showFormatPanel, setShowFormatPanel] = useState(false);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [showTopMenu, setShowTopMenu] = useState(false);
+  const [showMessageSearch, setShowMessageSearch] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
+  const [searchMatchIndex, setSearchMatchIndex] = useState(0);
   const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+  const [replyJumpTargetId, setReplyJumpTargetId] = useState<string | null>(null);
   const [activeMessageMenu, setActiveMessageMenu] = useState<string | null>(null);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [previewMedia, setPreviewMedia] = useState<{ uri: string; kind: 'image' | 'video'; fileName?: string; aspectRatio?: number } | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; left?: number; right?: number; mine: boolean } | null>(null);
+  const textSizeMap = { compact: 13, comfortable: 14, large: 16, xl: 18 } as const;
+  const wallpaperMap = {
+    midnight: { page: '#030B14', panel: '#0A192E', bubble: 'rgba(11, 23, 37, 0.90)', bubbleMine: 'rgba(22, 75, 109, 0.85)' },
+    obsidian: { page: '#05070B', panel: '#0E131A', bubble: 'rgba(18, 24, 33, 0.92)', bubbleMine: 'rgba(18, 52, 76, 0.9)' },
+    aurora: { page: '#040E16', panel: '#0B1B26', bubble: 'rgba(11, 31, 38, 0.9)', bubbleMine: 'rgba(10, 79, 84, 0.75)' },
+    graphite: { page: '#0A0D12', panel: '#151A20', bubble: 'rgba(23, 28, 35, 0.92)', bubbleMine: 'rgba(32, 53, 72, 0.82)' },
+  } as const;
+  const wall = wallpaperMap[appearanceSettings.wallpaper];
+  const messageFontSize = textSizeMap[appearanceSettings.textSize];
+  const fontFamilyMap = {
+    system: undefined,
+    figtree: 'Figtree',
+    'space-grotesk': 'Space Grotesk',
+    'instrument-serif': 'Instrument Serif',
+    oswald: 'Oswald',
+    'dancing-script': 'Dancing Script',
+  } as const;
+  const messageFontFamily = fontFamilyMap[appearanceSettings.fontFamily];
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
+  const [profileViewer, setProfileViewer] = useState<{ name: string; macroId: string; avatarUrl?: string; avatarColor: string } | null>(null);
+  const [videoRatios, setVideoRatios] = useState<Record<string, number>>({});
+  const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
+  const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+  const modalMaxWidth = Math.min(screenWidth * 0.9, 1200);
+  const modalMaxHeight = Math.min(screenHeight * 0.9, 800);
 
   const list = useRef<FlatList<Message>>(null);
   const conversationRef = useRef<any>(null);
+  const messageSearchRef = useRef<any>(null);
+  const messageSearchAnim = useRef(new Animated.Value(0)).current;
+  const swipeableRefs = useRef<Record<string, any>>({});
   const recordingTimerRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const inputRef = useRef<any>(null);
   const messages = useMemo(() => [...chat.messages].reverse(), [chat.messages]);
+  const searchMatches = useMemo(() => {
+    const search = messageSearchQuery.trim().toLowerCase();
+    if (!search) return [] as number[];
+    return messages
+      .map((message, index) => {
+        const haystack = [
+          message.text,
+          message.fileName,
+          message.kind,
+          message.senderId === 'me' ? 'you' : chat.name,
+        ].filter(Boolean).join(' ').toLowerCase();
+        return haystack.includes(search) ? index : -1;
+      })
+      .filter((index) => index >= 0);
+  }, [chat.name, messageSearchQuery, messages]);
+
+  const filteredMessages = useMemo(() => {
+    if (!showMessageSearch || !messageSearchQuery.trim()) return messages;
+    return messages.filter((_, index) => searchMatches.includes(index));
+  }, [messageSearchQuery, messages, searchMatches, showMessageSearch]);
   const activity = activityByChat[chat.id];
+  const [manualActivityState, setManualActivityState] = useState<'recording' | 'screenshot' | null>(null);
+  const activityLabel = activity
+    ? activity.state === 'recording'
+      ? 'recording voice note...'
+      : activity.state === 'screenshot'
+        ? 'taking a screenshot...'
+        : 'typing...'
+    : null;
+
+  useEffect(() => {
+    if (showMessageSearch) {
+      Animated.timing(messageSearchAnim, {
+        toValue: 1,
+        duration: 220,
+        useNativeDriver: true,
+      }).start();
+      requestAnimationFrame(() => messageSearchRef.current?.focus?.());
+    } else {
+      Animated.timing(messageSearchAnim, {
+        toValue: 0,
+        duration: 160,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [messageSearchAnim, showMessageSearch]);
+
+  useEffect(() => {
+    setSearchMatchIndex(0);
+  }, [messageSearchQuery, chat.id]);
+
+  const jumpToSearchMatch = (direction: 1 | -1) => {
+    if (!searchMatches.length) return;
+    const nextIndex = (searchMatchIndex + direction + searchMatches.length) % searchMatches.length;
+    setSearchMatchIndex(nextIndex);
+    const messageIndex = searchMatches[nextIndex];
+    if (messageIndex !== undefined) {
+      requestAnimationFrame(() => {
+        list.current?.scrollToIndex({ index: messageIndex, animated: true });
+      });
+    }
+  };
+
+  const jumpToMessage = (messageIdOrClientId?: string | null) => {
+    if (!messageIdOrClientId) return;
+    const index = messages.findIndex((message) => message.id === messageIdOrClientId || message.clientId === messageIdOrClientId);
+    if (index < 0) return;
+
+    setReplyJumpTargetId(messageIdOrClientId);
+    requestAnimationFrame(() => {
+      list.current?.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0.5,
+      });
+    });
+  };
+
+  useEffect(() => {
+    if (!replyJumpTargetId) return;
+    const timeout = setTimeout(() => setReplyJumpTargetId(null), 900);
+    return () => clearTimeout(timeout);
+  }, [replyJumpTargetId]);
 
   useEffect(() => {
     markRead(chat.id);
   }, [chat.id, chat.messages.length, markRead]);
 
   useEffect(() => {
+    inputRef.current?.focus?.();
+  }, [chat.id]);
+
+  useEffect(() => {
+    if (manualActivityState) {
+      sendChatActivity(chat.id, manualActivityState);
+      return () => sendChatActivity(chat.id, null);
+    }
+
     if (!text.trim()) {
       sendChatActivity(chat.id, null);
       return;
@@ -222,7 +396,7 @@ function Conversation({ chat }: { chat: Chat }) {
     sendChatActivity(chat.id, 'typing');
     const timeout = setTimeout(() => sendChatActivity(chat.id, null), 1500);
     return () => clearTimeout(timeout);
-  }, [chat.id, sendChatActivity, text]);
+  }, [chat.id, manualActivityState, sendChatActivity, text]);
 
   const closeAllPanels = () => {
     setShowEmojiPicker(false);
@@ -234,11 +408,41 @@ function Conversation({ chat }: { chat: Chat }) {
     setForwardMessage(null);
   };
 
+  const handleStickerPress = async (sticker: { id: string; label: string; source: any }) => {
+    setShowEmojiPicker(false);
+    try {
+      const resolvedSource = typeof (Image as any).resolveAssetSource === 'function'
+        ? (Image as any).resolveAssetSource(sticker.source)
+        : sticker.source;
+      const uri = typeof resolvedSource === 'string' ? resolvedSource : resolvedSource?.uri;
+
+      if (!uri) {
+        throw new Error('Sticker asset URI could not be resolved.');
+      }
+
+      await sendMediaMessage(chat.id, {
+        kind: 'image',
+        uri,
+        fileName: `sticker-${sticker.label}.png`,
+        mimeType: 'image/png',
+      });
+    } catch (error) {
+      console.warn('Sticker send failed:', error);
+    }
+  };
+
   const send = () => {
     const value = text.trim();
     if (!value) return;
-    sendMessage(chat.id, value, replyTarget?.id, { textColor, fontStyle, fontFamily });
+    const replyId = replyTarget?.id;
+    sendMessage(chat.id, value, replyId, { textColor, fontStyle, fontFamily });
     setText('');
+    setTextColor(colors.white);
+    setFontStyle('normal');
+    setFontFamily(FONT_FAMILIES[0].value);
+    if (replyId) {
+      swipeableRefs.current[replyId]?.close?.();
+    }
     setReplyTarget(null);
     setShowEmojiPicker(false);
     sendChatActivity(chat.id, null);
@@ -319,16 +523,75 @@ function Conversation({ chat }: { chat: Chat }) {
           file.mimeType?.startsWith('image/') ||
           file.name?.match(/\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i)
         );
+        const isVideo = Boolean(
+          file.mimeType?.startsWith('video/') ||
+          file.name?.match(/\.(mp4|mov|webm|m4v|mkv|avi)$/i)
+        );
         await sendMediaMessage(chat.id, {
-          kind: isImage ? 'image' : 'file',
+          kind: isVideo ? 'video' : isImage ? 'image' : 'file',
           uri: file.uri,
           fileName: file.name,
-          mimeType: file.mimeType || (isImage ? 'image/png' : 'application/octet-stream'),
+          mimeType: file.mimeType || (isVideo ? 'video/mp4' : isImage ? 'image/png' : 'application/octet-stream'),
         });
         requestAnimationFrame(() => list.current?.scrollToOffset({ offset: 0, animated: false }));
       }
     } catch (err) {
       console.warn('File pick canceled or failed', err);
+    }
+  };
+
+  const handleDroppedFiles = async (event: any) => {
+    event?.preventDefault?.();
+    const files = Array.from((event?.dataTransfer?.files ?? []) as File[]);
+    if (!files.length) return;
+
+    for (const file of files) {
+      if (!file) continue;
+      const resolvedFile = file as File;
+      const isImage = resolvedFile.type.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i.test(resolvedFile.name);
+      const isVideo = resolvedFile.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(resolvedFile.name);
+      if (!isImage && !isVideo) continue;
+
+      const uri = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(resolvedFile as Blob) : resolvedFile.name;
+      await sendMediaMessage(chat.id, {
+        kind: isVideo ? 'video' : 'image',
+        uri,
+        fileName: resolvedFile.name,
+        mimeType: resolvedFile.type || (isVideo ? 'video/mp4' : 'image/png'),
+      });
+    }
+
+    requestAnimationFrame(() => list.current?.scrollToOffset({ offset: 0, animated: false }));
+  };
+
+  const handleDownloadMedia = async () => {
+    if (!previewMedia) return;
+
+    try {
+      const fileName = previewMedia.fileName || `${previewMedia.kind}-${Date.now()}.${previewMedia.kind === 'video' ? 'mp4' : 'png'}`;
+
+      if (Platform.OS === 'web') {
+        const response = await fetch(previewMedia.uri);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = fileName;
+        link.click();
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+
+      const targetPath = `${FileSystem.Paths.document.uri}${fileName}`;
+      const downloadRes = await FileSystem.downloadAsync(previewMedia.uri, targetPath);
+      if (downloadRes.status >= 200 && downloadRes.status < 300) {
+        Alert.alert('Download complete', 'Media saved to your device.');
+      } else {
+        Alert.alert('Download failed', 'Unable to save this media to your device.');
+      }
+    } catch (error) {
+      console.warn('Media download failed:', error);
+      Alert.alert('Download failed', 'Unable to save this media to your device.');
     }
   };
 
@@ -340,13 +603,14 @@ function Conversation({ chat }: { chat: Chat }) {
 
   const timerOptions = [
     { label: 'Off', value: null },
+    { label: '1 min', value: 60 },
     { label: '1 hour', value: 3600 },
     { label: '24 hours', value: 86400 },
     { label: '7 days', value: 604800 },
     { label: '30 days', value: 2592000 },
   ] as const;
 
-  const handleMessageAction = async (messageKey: string, action: 'reply' | 'delete' | 'forward' | 'reaction', emoji?: string) => {
+  const handleMessageAction = async (messageKey: string, action: 'reply' | 'delete' | 'forward' | 'reaction' | 'pin' | 'star', emoji?: string) => {
     // Look up the message from current state by its stable clientId (falling back to id),
     // so the real server UUID is always available even right after the message syncs.
     const currentMessage = chat.messages.find((m) => m.clientId === messageKey || m.id === messageKey);
@@ -375,6 +639,16 @@ function Conversation({ chat }: { chat: Chat }) {
     }
     if (action === 'delete') {
       deleteMessage(chat.id, currentMessage.id);
+      closeMenu();
+      return;
+    }
+    if (action === 'pin') {
+      toggleMessagePin(chat.id, currentMessage.id);
+      closeMenu();
+      return;
+    }
+    if (action === 'star') {
+      toggleMessageStar(chat.id, currentMessage.id);
       closeMenu();
       return;
     }
@@ -432,68 +706,191 @@ function Conversation({ chat }: { chat: Chat }) {
   };
 
   return (
-    <View ref={conversationRef} style={styles.conversation}>
+    <View
+      ref={conversationRef}
+      style={[styles.conversation, { backgroundColor: wall.page }]}
+      {...({
+        onDragOver: (event: any) => {
+          event.preventDefault?.();
+          if (event?.dataTransfer) {
+            event.dataTransfer.dropEffect = 'copy';
+          }
+        },
+        onDrop: (event: any) => {
+          void handleDroppedFiles(event);
+        },
+      } as any)}
+    >
+      <AmbientQuantumField />
+
       {(showTopMenu || showAttachmentMenu || showEmojiPicker || showFormatPanel || activeMessageMenu) && (
         <Pressable style={styles.dismissOverlay} onPress={closeAllPanels} />
       )}
 
-      {/* HEADER */}
-      <View style={styles.chatHeader}>
-        <Avatar name={chat.name} color={chat.avatarColor} size={42} online={chat.online} imageUrl={chat.avatarUrl} />
-        <View style={styles.person}>
-          <Text style={styles.personName}>{chat.name}</Text>
-          <Text style={[styles.presence, activity && styles.presenceActive]}>{activity ? `${activity.state}...` : chat.lastSeen}</Text>
-        </View>
-        <Pressable accessibilityLabel="Search messages" style={styles.headerAction}>
-          <Ionicons name="search" size={20} color={colors.muted} />
-        </Pressable>
-        <Pressable accessibilityLabel="Video call" style={styles.headerAction} onPress={() => call(true)}>
-          <Ionicons name="videocam-outline" size={21} color={colors.blue} />
-        </Pressable>
-        <Pressable accessibilityLabel="Audio call" style={styles.headerAction} onPress={() => call(false)}>
-          <Ionicons name="call-outline" size={20} color={colors.blue} />
-        </Pressable>
-        <Pressable accessibilityLabel="More tools" style={styles.headerAction} onPress={() => setShowTopMenu(!showTopMenu)}>
-          <Ionicons name="ellipsis-vertical" size={19} color={colors.muted} />
-        </Pressable>
-
-        {showTopMenu && (
-          <View style={styles.topPopMenu}>
-            <Pressable style={styles.popMenuItem} onPress={() => { pinChat(chat.id); setShowTopMenu(false); }}>
-              <Ionicons name={chat.pinned ? 'pin' : 'pin-outline'} size={16} color={colors.white} />
-              <Text style={styles.popMenuText}>{chat.pinned ? 'Unpin chat' : 'Pin chat'}</Text>
-            </Pressable>
-            <Pressable style={styles.popMenuItem} onPress={() => { muteChat(chat.id); setShowTopMenu(false); }}>
-              <Ionicons name={chat.muted ? 'volume-high-outline' : 'volume-mute-outline'} size={16} color={colors.white} />
-              <Text style={styles.popMenuText}>{chat.muted ? 'Unmute' : 'Mute notifications'}</Text>
-            </Pressable>
-            <View style={styles.timerSection}>
-              <Text style={styles.timerTitle}>Disappearing messages</Text>
-              <View style={styles.timerGrid}>
-                {timerOptions.map((option) => (
-                  <Pressable
-                    key={option.label}
-                    style={[styles.timerChip, chat.disappearingSeconds === option.value && styles.timerChipActive]}
-                    onPress={() => { setChatDisappearingTimer(chat.id, option.value); setShowTopMenu(false); }}
-                  >
-                    <Text style={[styles.timerChipText, chat.disappearingSeconds === option.value && styles.timerChipTextActive]}>{option.label}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            </View>
-            <Pressable style={styles.popMenuItem} onPress={() => { clearChat(chat.id); setShowTopMenu(false); }}>
-              <Ionicons name="trash-outline" size={16} color={colors.white} />
-              <Text style={styles.popMenuText}>Clear chat</Text>
-            </Pressable>
-            {chat.participantUserId && (
-              <Pressable style={styles.popMenuItem} onPress={() => { void blockContact(chat.participantUserId!); setShowTopMenu(false); }}>
-                <Ionicons name="ban-outline" size={16} color={colors.danger} />
-                <Text style={[styles.popMenuText, { color: colors.danger }]}>Block contact</Text>
-              </Pressable>
+      {/* HEADER - MOBILE BACK BUTTON */}
+      {isMobile && (
+        <View style={[styles.chatHeader, styles.mobileHeader]}>
+          <Pressable onPress={() => router.back()} style={styles.mobileBackButton}>
+            <Ionicons name="chevron-back" size={24} color={colors.white} />
+          </Pressable>
+          <Pressable onPress={() => setProfileViewer({ name: chat.name, macroId: chat.macroId, avatarUrl: chat.avatarUrl, avatarColor: chat.avatarColor })}>
+            <Avatar name={chat.name} color={chat.avatarColor} size={32} online={chat.online} imageUrl={chat.avatarUrl} />
+          </Pressable>
+          <View style={styles.mobilePersonInfo}>
+            <Text style={styles.personName}>{chat.name}</Text>
+            {activity ? (
+              <Text style={[styles.presence, styles.presenceActive]}>{activity.state === 'recording' ? 'recording voice note...' : activity.state === 'screenshot' ? 'taking a screenshot...' : 'typing...'}</Text>
+            ) : chat.online ? (
+              <Text style={[styles.presence, styles.presenceActive]}>online</Text>
+            ) : (
+              <Text style={styles.presence}>{chat.lastSeen}</Text>
             )}
           </View>
-        )}
-      </View>
+          <Pressable
+            accessibilityLabel="More tools"
+            style={styles.mobileMenuButton}
+            onPress={() => setShowTopMenu(!showTopMenu)}
+          >
+            <Ionicons name="ellipsis-vertical" size={18} color={colors.muted} />
+          </Pressable>
+
+          {showTopMenu && (
+            <View style={[styles.topPopMenu, styles.mobileTopMenu]}>
+              <Pressable style={styles.popMenuItem} onPress={() => { pinChat(chat.id); setShowTopMenu(false); }}>
+                <Ionicons name={chat.pinned ? 'pin' : 'pin-outline'} size={16} color={colors.white} />
+                <Text style={styles.popMenuText}>{chat.pinned ? 'Unpin chat' : 'Pin chat'}</Text>
+              </Pressable>
+              <Pressable style={styles.popMenuItem} onPress={() => { muteChat(chat.id); setShowTopMenu(false); }}>
+                <Ionicons name={chat.muted ? 'volume-high-outline' : 'volume-mute-outline'} size={16} color={colors.white} />
+                <Text style={styles.popMenuText}>{chat.muted ? 'Unmute' : 'Mute notifications'}</Text>
+              </Pressable>
+              <View style={styles.timerSection}>
+                <Text style={styles.timerTitle}>Disappearing messages</Text>
+                <View style={styles.timerGrid}>
+                  {timerOptions.map((option) => (
+                    <Pressable
+                      key={option.label}
+                      style={[styles.timerChip, chat.disappearingSeconds === option.value && styles.timerChipActive]}
+                      onPress={() => { setChatDisappearingTimer(chat.id, option.value); setShowTopMenu(false); }}
+                    >
+                      <Text style={[styles.timerChipText, chat.disappearingSeconds === option.value && styles.timerChipTextActive]}>{option.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+              <Pressable style={styles.popMenuItem} onPress={() => { clearChat(chat.id); setShowTopMenu(false); }}>
+                <Ionicons name="trash-outline" size={16} color={colors.white} />
+                <Text style={styles.popMenuText}>Clear chat</Text>
+              </Pressable>
+              {chat.participantUserId && (
+                <Pressable style={styles.popMenuItem} onPress={() => { void blockContact(chat.participantUserId!); setShowTopMenu(false); }}>
+                  <Ionicons name="ban-outline" size={16} color={colors.danger} />
+                  <Text style={[styles.popMenuText, { color: colors.danger }]}>Block contact</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* HEADER - DESKTOP */}
+      {!isMobile && (
+        <View style={styles.chatHeader}>
+          <Pressable onPress={() => setProfileViewer({ name: chat.name, macroId: chat.macroId, avatarUrl: chat.avatarUrl, avatarColor: chat.avatarColor })}>
+            <Avatar name={chat.name} color={chat.avatarColor} size={42} online={chat.online} imageUrl={chat.avatarUrl} />
+          </Pressable>
+          <View style={styles.person}>
+            <Text style={styles.personName}>{chat.name}</Text>
+            {activity ? (
+              <Text style={[styles.presence, styles.presenceActive]}>
+                {activity.state === 'recording' ? 'recording voice note...' : activity.state === 'screenshot' ? 'taking a screenshot...' : 'typing...'}
+              </Text>
+            ) : chat.online ? (
+              <View style={styles.presenceRow}>
+                <View style={styles.presenceDot} />
+                <Text style={[styles.presence, styles.presenceActive]}>online</Text>
+              </View>
+            ) : (
+              <Text style={styles.presence}>{chat.lastSeen}</Text>
+            )}
+          </View>
+          <Pressable
+            accessibilityLabel="Screenshot activity"
+            style={styles.headerAction}
+            onPress={() => setManualActivityState((current) => current === 'screenshot' ? null : 'screenshot')}
+          >
+            <Ionicons name="camera-outline" size={18} color={manualActivityState === 'screenshot' ? colors.neon : colors.muted} />
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Search messages"
+            style={styles.headerAction}
+            onPress={() => {
+              setShowMessageSearch((current) => !current);
+              if (showMessageSearch) {
+                setMessageSearchQuery('');
+              }
+            }}
+          >
+            <Ionicons name="search" size={20} color={showMessageSearch ? colors.neon : colors.muted} />
+          </Pressable>
+          <Pressable accessibilityLabel="Video call" style={styles.headerAction} onPress={() => call(true)}>
+            <Ionicons name="videocam-outline" size={21} color={colors.blue} />
+          </Pressable>
+          <Pressable accessibilityLabel="Audio call" style={styles.headerAction} onPress={() => call(false)}>
+            <Ionicons name="call-outline" size={20} color={colors.blue} />
+          </Pressable>
+          <Pressable accessibilityLabel="More tools" style={styles.headerAction} onPress={() => setShowTopMenu(!showTopMenu)}>
+            <Ionicons name="ellipsis-vertical" size={19} color={colors.muted} />
+          </Pressable>
+
+          {showTopMenu && (
+            <View style={styles.topPopMenu}>
+              <Pressable style={styles.popMenuItem} onPress={() => { pinChat(chat.id); setShowTopMenu(false); }}>
+                <Ionicons name={chat.pinned ? 'pin' : 'pin-outline'} size={16} color={colors.white} />
+                <Text style={styles.popMenuText}>{chat.pinned ? 'Unpin chat' : 'Pin chat'}</Text>
+              </Pressable>
+              <Pressable style={styles.popMenuItem} onPress={() => { muteChat(chat.id); setShowTopMenu(false); }}>
+                <Ionicons name={chat.muted ? 'volume-high-outline' : 'volume-mute-outline'} size={16} color={colors.white} />
+                <Text style={styles.popMenuText}>{chat.muted ? 'Unmute' : 'Mute notifications'}</Text>
+              </Pressable>
+              <View style={styles.timerSection}>
+                <Text style={styles.timerTitle}>Disappearing messages</Text>
+                <View style={styles.timerGrid}>
+                  {timerOptions.map((option) => (
+                    <Pressable
+                      key={option.label}
+                      style={[styles.timerChip, chat.disappearingSeconds === option.value && styles.timerChipActive]}
+                      onPress={() => { setChatDisappearingTimer(chat.id, option.value); setShowTopMenu(false); }}
+                    >
+                      <Text style={[styles.timerChipText, chat.disappearingSeconds === option.value && styles.timerChipTextActive]}>{option.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+              <Pressable style={styles.popMenuItem} onPress={() => { clearChat(chat.id); setShowTopMenu(false); }}>
+                <Ionicons name="trash-outline" size={16} color={colors.white} />
+                <Text style={styles.popMenuText}>Clear chat</Text>
+              </Pressable>
+              {chat.participantUserId && (
+                <Pressable style={styles.popMenuItem} onPress={() => { void blockContact(chat.participantUserId!); setShowTopMenu(false); }}>
+                  <Ionicons name="ban-outline" size={16} color={colors.danger} />
+                  <Text style={[styles.popMenuText, { color: colors.danger }]}>Block contact</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
+        </View>
+      )}
+
+      {chat.peerDevice && (
+        <View style={styles.deviceFlag} pointerEvents="none">
+          <View style={styles.deviceFlagRope} />
+          <View style={styles.deviceFlagBody}>
+            <Ionicons name={deviceIcon(chat.peerDevice)} size={13} color={colors.neon} />
+            <Text style={styles.deviceFlagText}>{deviceLabel(chat.peerDevice)}</Text>
+          </View>
+        </View>
+      )}
 
       <View style={styles.encryption}>
         <Ionicons name="lock-closed" size={10} color={colors.neon} />
@@ -501,6 +898,47 @@ function Conversation({ chat }: { chat: Chat }) {
       </View>
 
       {/* MESSAGE LIST */}
+      <Animated.View
+        pointerEvents={showMessageSearch ? 'auto' : 'none'}
+        style={[
+          styles.messageSearchBar,
+          {
+            opacity: messageSearchAnim,
+            transform: [{ translateY: messageSearchAnim.interpolate({ inputRange: [0, 1], outputRange: [-8, 0] }) }],
+            maxHeight: messageSearchAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 78] }),
+          },
+        ]}
+      >
+        <View style={styles.messageSearchRow}>
+          <Ionicons name="search" size={16} color={colors.muted} />
+          <TextInput
+            ref={messageSearchRef}
+            value={messageSearchQuery}
+            onChangeText={setMessageSearchQuery}
+            placeholder="Search this chat"
+            placeholderTextColor={colors.muted}
+            style={[styles.messageSearchInput, { outlineWidth: 0, outlineStyle: 'none' } as never]}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {searchMatches.length > 0 && (
+            <View style={styles.searchNavWrap}>
+              <Pressable onPress={() => jumpToSearchMatch(-1)} style={styles.searchNavBtn}>
+                <Ionicons name="chevron-up" size={13} color={colors.white} />
+              </Pressable>
+              <Pressable onPress={() => jumpToSearchMatch(1)} style={styles.searchNavBtn}>
+                <Ionicons name="chevron-down" size={13} color={colors.white} />
+              </Pressable>
+            </View>
+          )}
+          {messageSearchQuery ? (
+            <Pressable onPress={() => setMessageSearchQuery('')}>
+              <Ionicons name="close-circle" size={16} color={colors.muted} />
+            </Pressable>
+          ) : null}
+        </View>
+      </Animated.View>
+
       {replyTarget && (
         <View style={styles.replyBanner}>
           <View style={styles.replyContext}>
@@ -513,9 +951,9 @@ function Conversation({ chat }: { chat: Chat }) {
 
       <FlatList
         ref={list}
-        data={messages}
+        data={filteredMessages}
         inverted
-        keyExtractor={(item) => item.clientId ?? item.id}
+        keyExtractor={(item) => item.id}
         style={styles.messageList}
         contentContainerStyle={styles.messageContent}
         keyboardShouldPersistTaps="handled"
@@ -525,15 +963,37 @@ function Conversation({ chat }: { chat: Chat }) {
             return <CallMessageBubble item={item} />;
           }
 
+          if (item.kind === 'system') {
+            return (
+              <View style={styles.systemRow}>
+                <View style={styles.systemPill}>
+                  <Text style={styles.systemText}>{item.text}</Text>
+                </View>
+                <Text style={styles.systemStamp}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
+              </View>
+            );
+          }
+
           const mine = item.senderId === 'me';
+          const isSticker = Boolean(
+            item.fileName?.toLowerCase().startsWith('sticker-') ||
+            item.text?.toLowerCase().includes('sticker')
+          );
           const isImage = item.kind === 'image' || Boolean(
             item.mediaUrl?.startsWith('data:image/') ||
             item.mimeType?.startsWith('image/') ||
             item.fileName?.match(/\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i)
           );
+          const isVideo = item.kind === 'video' || Boolean(
+            item.mediaUrl?.startsWith('data:video/') ||
+            item.mediaUrl?.includes('.mp4') ||
+            item.mimeType?.startsWith('video/') ||
+            item.fileName?.match(/\.(mp4|mov|webm|m4v|mkv|avi)$/i)
+          );
           const isVoice = item.kind === 'voice';
 
           const isMenuOpen = activeMessageMenu === (item.clientId ?? item.id);
+          const isReplyJumpTarget = item.id === replyJumpTargetId || item.clientId === replyJumpTargetId;
 
           const repliedMessage = item.replyTo ? chat.messages.find((message) => message.id === item.replyTo) : null;
           const reactionSummary = Array.from((messageReactions[item.id] ?? []).reduce((map, reaction) => {
@@ -543,63 +1003,117 @@ function Conversation({ chat }: { chat: Chat }) {
           }, new Map<string, number>())).map(([emoji, count]) => ({ emoji, count }));
 
           return (
-            <View style={[styles.bubbleWrap, mine ? styles.mineWrap : styles.theirsWrap]}>
-              <View style={[styles.bubble, mine ? styles.mine : styles.theirs, isMenuOpen && styles.bubbleActive]}>
-                {item.replyTo && repliedMessage && (
-                  <View style={styles.replyPreview}>
-                    <Text style={styles.replyPreviewText} numberOfLines={1}>
-                      {repliedMessage.senderId === 'me' ? 'You' : chat.name}: {repliedMessage.text || repliedMessage.fileName || (repliedMessage.kind === 'voice' ? 'Voice note' : repliedMessage.kind === 'image' ? 'Photo' : 'Message')}
-                    </Text>
-                  </View>
-                )}
-                {isVoice ? (
-                  <VoiceNoteBubble item={item} />
-                ) : isImage && (item.mediaUrl || item.mediaPath) ? (
-                  <Pressable onPress={() => setPreviewImage(item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : null))}>
-                    <Image source={{ uri: item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : undefined) }} style={styles.photoThumbnail} resizeMode="cover" />
-                    {item.fileName ? <Text style={styles.photoCaption} numberOfLines={1}>{item.fileName}</Text> : null}
-                  </Pressable>
-                ) : item.kind && item.kind !== 'text' ? (
-                  <View style={styles.attachment}>
-                    <Ionicons name="document-outline" size={20} color={colors.blue} />
-                    <Text style={styles.attachmentText}>{item.fileName || item.text || item.kind}</Text>
-                  </View>
-                ) : (
-                  <Text
-                    style={[
-                      styles.messageText,
-                      item.textColor ? { color: item.textColor } : null,
-                      item.fontStyle ? { fontStyle: item.fontStyle } : null,
-                      item.fontFamily ? { fontFamily: item.fontFamily as any } : null,
-                    ]}
-                  >
-                    {item.text}
-                  </Text>
-                )}
-                {reactionSummary.length > 0 && (
-                  <View style={styles.reactionStrip}>
-                    {reactionSummary.map((reaction) => (
-                      <View key={reaction.emoji} style={styles.reactionPill}>
-                        <Text style={styles.reactionText}>{reaction.emoji}</Text>
-                        <Text style={styles.reactionCount}>{reaction.count}</Text>
+            <Swipeable
+              ref={(ref) => {
+                if (ref) {
+                  swipeableRefs.current[item.id] = ref;
+                } else {
+                  delete swipeableRefs.current[item.id];
+                }
+              }}
+              enabled
+              renderLeftActions={() => <View style={styles.replySwipeAction} />}
+              renderRightActions={() => <View style={styles.replySwipeAction} />}
+              onSwipeableOpen={(direction) => {
+                if (direction === 'left' || direction === 'right') {
+                  setReplyTarget(item);
+                }
+              }}
+            >
+              <View style={[styles.bubbleWrap, mine ? styles.mineWrap : styles.theirsWrap]}>
+                <View style={[
+                  styles.bubble,
+                  mine ? styles.mine : styles.theirs,
+                  { backgroundColor: mine ? wall.bubbleMine : wall.bubble },
+                  isSticker && styles.stickerBubble,
+                  isMenuOpen && styles.bubbleActive,
+                  isReplyJumpTarget && styles.replyJumpFlash,
+                ]}>
+                  {item.expiresAt && <MessageTimerBorder expiresAt={item.expiresAt} createdAt={item.createdAt} radius={16} />}
+                  {item.replyTo && repliedMessage && (
+                    <Pressable onPress={() => jumpToMessage(repliedMessage.id || repliedMessage.clientId)} style={styles.replyPreview}>
+                      <Text style={styles.replyPreviewText}>
+                        {repliedMessage.senderId === 'me' ? 'You' : chat.name}: {repliedMessage.text || repliedMessage.fileName || (repliedMessage.kind === 'voice' ? 'Voice note' : repliedMessage.kind === 'image' ? 'Photo' : 'Message')}
+                      </Text>
+                    </Pressable>
+                  )}
+                  {isVoice ? (
+                    <VoiceNoteBubble item={item} />
+                  ) : isVideo && (item.mediaUrl || item.mediaPath) ? (
+                    <Pressable onPress={() => setPreviewMedia({ uri: item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : '') || '', kind: 'video', fileName: item.fileName, aspectRatio: videoRatios[item.id] ?? 16 / 9 })}>
+                      <View style={[styles.videoBubbleContainer, { aspectRatio: videoRatios[item.id] || 16 / 9, width: 280, maxWidth: '90%', height: 'auto', maxHeight: 380 }]}>
+                        <VideoThumbnail
+                          uri={item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : '') || ''}
+                          onMeta={(meta) => {
+                            if (meta.ratio) setVideoRatios((current) => (current[item.id] ? current : { ...current, [item.id]: meta.ratio! }));
+                            if (meta.durationMs) setVideoDurations((current) => (current[item.id] ? current : { ...current, [item.id]: meta.durationMs! }));
+                          }}
+                        />
+                        <View style={styles.videoScrim} />
+                        <View style={styles.videoPlayBadge}><Ionicons name="play" size={22} color={colors.navy950} /></View>
+                        <View style={styles.videoDurationPill}>
+                          <Ionicons name="videocam" size={11} color={colors.white} />
+                          <Text style={styles.videoDurationText}>{formatClipDuration(videoDurations[item.id])}</Text>
+                        </View>
                       </View>
-                    ))}
+                    </Pressable>
+                  ) : isImage && (item.mediaUrl || item.mediaPath) ? (
+                    isSticker ? (
+                      <Image source={{ uri: item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : undefined) }} style={styles.stickerImageOnly} resizeMode="contain" />
+                    ) : (
+                      <Pressable onPress={() => setPreviewMedia({ uri: item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : '') || '', kind: 'image', fileName: item.fileName })}>
+                        <Image source={{ uri: item.mediaUrl || (item.mediaPath?.startsWith('data:') ? item.mediaPath : undefined) }} style={styles.photoThumbnail} resizeMode="cover" />
+                        {item.fileName ? <Text style={styles.photoCaption} numberOfLines={1}>{item.fileName.replace(/^sticker-/, '')}</Text> : null}
+                      </Pressable>
+                    )
+                  ) : item.kind && item.kind !== 'text' ? (
+                    <View style={styles.attachment}>
+                      <Ionicons name="document-outline" size={20} color={colors.blue} />
+                      <Text style={styles.attachmentText}>{item.fileName || item.text || item.kind}</Text>
+                    </View>
+                  ) : (
+                    <Text
+                      style={[
+                        styles.messageText,
+                        { fontSize: messageFontSize, lineHeight: messageFontSize + 6, fontFamily: messageFontFamily || 'system' },
+                        item.textColor ? { color: item.textColor } : null,
+                        item.fontStyle ? { fontStyle: item.fontStyle } : null,
+                      ]}
+                    >
+                      {item.text}
+                    </Text>
+                  )}
+                  {(item.pinned || item.starred) && (
+                    <View style={styles.messageFlagRow}>
+                      {item.pinned && <Ionicons name="pin" size={12} color={colors.neon} />}
+                      {item.starred && <Ionicons name="star" size={12} color={colors.yellow} />}
+                    </View>
+                  )}
+                  {reactionSummary.length > 0 && (
+                    <View style={styles.reactionStrip}>
+                      {reactionSummary.map((reaction) => (
+                        <View key={reaction.emoji} style={styles.reactionPill}>
+                          <Text style={styles.reactionText}>{reaction.emoji}</Text>
+                          <Text style={styles.reactionCount}>{reaction.count}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                  <View style={styles.meta}>
+                    {item.expiresAt && <Text style={styles.expiry}>{expiryLabel(item.expiresAt)}</Text>}
+                    <Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
+                    {mine && <MessageTicks status={item.status} />}
                   </View>
-                )}
-                <View style={styles.meta}>
-                  {item.expiresAt && <Text style={styles.expiry}>◷ {expiryLabel(item.expiresAt)}</Text>}
-                  <Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
-                  {mine && <MessageTicks status={item.status} />}
                 </View>
-              </View>
 
-              <Pressable
-                style={styles.messageMenuButton}
-                onPress={(event) => openMessageMenu(event, item, mine)}
-              >
-                <Ionicons name="ellipsis-vertical" size={14} color={colors.muted} />
-              </Pressable>
-            </View>
+                <Pressable
+                  style={styles.messageMenuButton}
+                  onPress={(event) => openMessageMenu(event, item, mine)}
+                >
+                  <Ionicons name="ellipsis-vertical" size={14} color={colors.muted} />
+                </Pressable>
+              </View>
+            </Swipeable>
           );
         }}
       />
@@ -609,44 +1123,103 @@ function Conversation({ chat }: { chat: Chat }) {
         <View
           style={[
             styles.messageActionMenu,
-            { top: menuAnchor.top },
+            { top: menuAnchor.top, pointerEvents: 'auto' },
             menuAnchor.mine ? { right: menuAnchor.right } : { left: menuAnchor.left },
           ]}
-          pointerEvents="auto"
         >
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'reaction', '👍'); }}><Text style={styles.actionIcon}>👍</Text><Text style={styles.actionText}>React</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'reply'); }}><Ionicons name="return-down-forward-outline" size={14} color={colors.white} /><Text style={styles.actionText}>Reply</Text></Pressable>
+          <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'pin'); }}><Ionicons name="pin" size={14} color={colors.white} /><Text style={styles.actionText}>{activeMenuMessage?.pinned ? 'Unpin' : 'Pin'}</Text></Pressable>
+          <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'star'); }}><Ionicons name="star" size={14} color={colors.white} /><Text style={styles.actionText}>{activeMenuMessage?.starred ? 'Unstar' : 'Star'}</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'forward'); }}><Ionicons name="arrow-redo-outline" size={14} color={colors.white} /><Text style={styles.actionText}>Forward</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'delete'); }}><Ionicons name="trash-outline" size={14} color={colors.danger} /><Text style={[styles.actionText, { color: colors.danger }]}>Delete</Text></Pressable>
         </View>
       )}
 
-      {/* IMAGE PREVIEW LIGHTBOX MODAL */}
-      <Modal visible={Boolean(previewImage)} transparent animationType="fade" onRequestClose={() => setPreviewImage(null)}>
+      {profileViewer && (
+        <Modal transparent animationType="fade" visible onRequestClose={() => setProfileViewer(null)}>
+          <Pressable style={styles.profileModalBackdrop} onPress={() => setProfileViewer(null)}>
+            <Pressable style={styles.profileModalCard} onPress={() => undefined}>
+              <Pressable style={styles.profileModalClose} onPress={() => setProfileViewer(null)}>
+                <Ionicons name="close" size={22} color={colors.white} />
+              </Pressable>
+              <Avatar name={profileViewer.name} color={profileViewer.avatarColor} size={120} imageUrl={profileViewer.avatarUrl} />
+              <Text style={styles.profileModalName}>{profileViewer.name}</Text>
+              <Text style={styles.profileModalMacro}>{profileViewer.macroId}</Text>
+              <Text style={styles.profileModalMeta}>Contact profile</Text>
+            </Pressable>
+          </Pressable>
+        </Modal>
+      )}
+
+      {/* MEDIA PREVIEW LIGHTBOX MODAL */}
+      <Modal visible={Boolean(previewMedia)} transparent animationType="fade" onRequestClose={() => setPreviewMedia(null)}>
         <View style={styles.imageModalBackdrop}>
-          <Pressable style={styles.imageModalClose} onPress={() => setPreviewImage(null)}>
+          <Pressable style={styles.imageModalClose} onPress={() => setPreviewMedia(null)}>
             <Ionicons name="close" size={28} color={colors.white} />
           </Pressable>
-          {previewImage && (
-            <Image source={{ uri: previewImage }} style={styles.imageModalContent} resizeMode="contain" />
+
+          {previewMedia && (
+            <>
+              <View style={[styles.mediaModalFrame, { maxWidth: modalMaxWidth, maxHeight: modalMaxHeight }]}>
+                {previewMedia && previewMedia.kind === 'video' ? (
+                  <Video
+                    source={{ uri: previewMedia.uri }}
+                    style={[styles.mediaModalContent, { width: '100%', height: '100%', aspectRatio: previewMedia.aspectRatio || 16 / 9 }]}
+                    resizeMode={ResizeMode.CONTAIN}
+                    useNativeControls
+                    isLooping={false}
+                  />
+                ) : previewMedia && (
+                  <Image source={{ uri: previewMedia.uri }} style={styles.mediaModalImage} resizeMode="contain" />
+                )}
+              </View>
+
+              <View style={styles.previewActionsRow}>
+                <Pressable style={styles.previewDownloadButton} onPress={handleDownloadMedia}>
+                  <Ionicons name="download-outline" size={18} color={colors.white} />
+                  <Text style={styles.previewDownloadText}>Download</Text>
+                </Pressable>
+              </View>
+            </>
           )}
         </View>
       </Modal>
 
       {/* EMOJI PICKER POPUP */}
       {showEmojiPicker && (
-        <View style={styles.emojiGrid}>
-          {EMOJI_LIST.map((emoji) => (
-            <Pressable
-              key={emoji}
-              style={styles.emojiBtn}
-              onPress={() => {
-                setText((prev) => prev + emoji);
-              }}
-            >
-              <Text style={{ fontSize: 20 }}>{emoji}</Text>
-            </Pressable>
-          ))}
+        <View style={[styles.emojiGrid, isMobile && styles.mobileEmojiGrid]}>
+          <View style={styles.pickerSectionHeader}>
+            <Text style={styles.pickerSectionTitle}>Emoji</Text>
+          </View>
+          <View style={[styles.emojiGridInner, isMobile && styles.mobileEmojiGridInner]}>
+            {EMOJI_LIST.map((emoji) => (
+              <Pressable
+                key={emoji}
+                style={[styles.emojiBtn, isMobile && styles.mobileEmojiBtn]}
+                onPress={() => {
+                  setText((prev) => prev + emoji);
+                }}
+              >
+                <Text style={{ fontSize: isMobile ? 16 : 20 }}>{emoji}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <View style={styles.pickerSectionHeader}>
+            <Text style={styles.pickerSectionTitle}>Stickers</Text>
+          </View>
+          <View style={[styles.stickerGrid, isMobile && styles.mobileStickerGrid]}>
+            {STICKER_LIST.map((sticker) => (
+              <Pressable
+                key={sticker.id}
+                style={[styles.stickerBtn, isMobile && styles.mobileStickerBtn]}
+                onPress={() => void handleStickerPress(sticker)}
+              >
+                <Image source={sticker.source} style={[styles.stickerImage, isMobile && styles.mobileStickerImage]} resizeMode="contain" />
+              </Pressable>
+            ))}
+          </View>
         </View>
       )}
 
@@ -719,7 +1292,7 @@ function Conversation({ chat }: { chat: Chat }) {
       )}
 
       {/* COMPOSER */}
-      <View style={styles.composer}>
+      <View style={[styles.composer, { backgroundColor: wall.panel }]}>
         <Pressable
           accessibilityLabel="Attach media"
           style={styles.composeAction}
@@ -745,6 +1318,7 @@ function Conversation({ chat }: { chat: Chat }) {
               </View>
             ) : (
               <TextInput
+                ref={inputRef}
                 value={text}
                 onChangeText={setText}
                 placeholder="Type a message"
@@ -809,7 +1383,18 @@ function Conversation({ chat }: { chat: Chat }) {
 }
 
 export function WebMessenger({ initialChatId }: { initialChatId?: string } = {}) {
-  const { chats, profile, pinChat, muteChat, markChatUnread, clearChat, blockContact, deleteChat } = useApp();
+  const [windowWidth, setWindowWidth] = useState(() => Dimensions.get('window').width);
+  const isMobileView = windowWidth < 820;
+
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowWidth(Dimensions.get('window').width);
+    };
+    const subscription = Dimensions.addEventListener('change', handleResize);
+    return () => subscription?.remove();
+  }, []);
+
+  const { chats, profile, pinChat, muteChat, markChatUnread, clearChat, blockContact, deleteChat, activityByChat } = useApp();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'unread' | 'groups'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(initialChatId ?? null);
@@ -836,7 +1421,9 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
     if (initialChatId) setSelectedId(initialChatId);
   }, [initialChatId]);
 
-  return (
+  return isMobileView && selected ? (
+    <Conversation chat={selected} />
+  ) : (
     <View style={styles.desktop}>
       {activeContextMenu && <Pressable style={styles.sidebarDismissOverlay} onPress={() => setActiveContextMenu(null)} />}
       <View style={styles.rail}>
@@ -846,8 +1433,9 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
           <Pressable accessibilityLabel="Updates" style={styles.railButton} onPress={() => router.push('/updates')}><Ionicons name="radio-outline" size={22} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="Calls" style={styles.railButton} onPress={() => router.push('/calls')}><Ionicons name="call-outline" size={21} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="People" style={styles.railButton} onPress={() => router.push('/people')}><Ionicons name="people-outline" size={22} color={colors.muted} /></Pressable>
+          <Pressable accessibilityLabel="Settings" style={styles.railButton} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={22} color={colors.muted} /></Pressable>
         </View>
-        <View style={styles.profileAvatar}><Avatar name={profile?.displayName || 'Macro'} color={profile?.avatarColor || colors.blue} size={34} online imageUrl={profile?.avatarUrl} /></View>
+        <Pressable style={styles.profileAvatar} accessibilityLabel="Settings" onPress={() => router.push('/(tabs)/settings')}><Avatar name={profile?.displayName || 'Macro'} color={profile?.avatarColor || colors.blue} size={34} online imageUrl={profile?.avatarUrl} /></Pressable>
       </View>
 
       <View style={styles.sidebar}>
@@ -881,6 +1469,7 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
           renderItem={({ item }) => {
             const last = item.messages[item.messages.length - 1];
             const isMenuOpen = activeContextMenu === item.id;
+            const rowActivity = activityByChat[item.id];
             return (
               <Pressable
                 style={[
@@ -907,9 +1496,22 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
                   </View>
 
                   <View style={styles.chatLine}>
-                    <Text style={styles.preview} numberOfLines={1}>
-                      {last?.senderId === 'me' ? 'You: ' : ''}{last?.text ?? 'Start a private conversation'}
-                    </Text>
+                    {rowActivity ? (
+                      <Text style={[styles.preview, styles.previewTyping]} numberOfLines={1}>
+                        {rowActivity.state === 'recording' ? 'recording voice note...' : rowActivity.state === 'screenshot' ? 'taking a screenshot...' : 'typing...'}
+                      </Text>
+                    ) : (
+                      <>
+                        {last?.senderId === 'me' && (
+                          <View style={styles.previewTick}>
+                            <MessageTicks status={last.status} />
+                          </View>
+                        )}
+                        <Text style={styles.preview} numberOfLines={1}>
+                          {last?.text ?? 'Start a private conversation'}
+                        </Text>
+                      </>
+                    )}
                     {item.unread > 0 && (
                       <View style={styles.badge}><Text style={styles.badgeText}>{item.unread > 99 ? '99+' : item.unread}</Text></View>
                     )}
@@ -927,7 +1529,7 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
 
                   {/* SIDEBAR ROW CONTEXT MENU */}
                   {isMenuOpen && (
-                    <View style={styles.rowContextMenu} pointerEvents="auto">
+                    <View style={[styles.rowContextMenu, { pointerEvents: 'auto' }]}>
                       <Pressable style={styles.ctxItem} onPress={(e) => { e.stopPropagation(); pinChat(item.id); setActiveContextMenu(null); }}>
                         <Ionicons name={item.pinned ? 'pin' : 'pin-outline'} size={15} color={colors.neon} />
                         <Text style={styles.ctxText}>{item.pinned ? 'Unpin chat' : 'Pin chat'}</Text>
@@ -975,7 +1577,7 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
 }
 
 const styles = StyleSheet.create({
-  desktop: { position: 'relative', flex: 1, flexDirection: 'row', minWidth: 820, backgroundColor: colors.navy950 },
+  desktop: { position: 'relative', flex: 1, flexDirection: 'row', minWidth: 820, backgroundColor: '#010A12', overflow: 'hidden' },
   sidebarDismissOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 25, backgroundColor: 'transparent', pointerEvents: 'auto' },
   rail: { width: 68, backgroundColor: colors.black, borderRightWidth: 1, borderRightColor: colors.border, alignItems: 'center', paddingVertical: 14 },
   logo: { width: 38, height: 38, borderRadius: 8, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' },
@@ -1001,54 +1603,86 @@ const styles = StyleSheet.create({
   chatList: { flex: 1, zIndex: 1, overflow: 'visible' },
   chatRow: { position: 'relative', minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 13, zIndex: 1, overflow: 'visible', elevation: 1 },
   chatRowActive: { backgroundColor: colors.navy800, borderLeftWidth: 3, borderLeftColor: colors.neon, paddingLeft: 10, zIndex: 2, elevation: 2 },
-  chatRowMenuOpen: { zIndex: 300000, elevation: 300000 },
+  chatRowMenuOpen: { zIndex: 9999999, elevation: 9999999 },
   chatCopy: { flex: 1, minWidth: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, paddingVertical: 14, position: 'relative', zIndex: 1 },
-  chatCopyMenuOpen: { zIndex: 300000, elevation: 300000 },
+  chatCopyMenuOpen: { zIndex: 9999999, elevation: 9999999 },
   chatLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   chatName: { color: colors.white, fontWeight: '800', fontSize: 14, flex: 1 },
   chatTime: { color: colors.muted, fontSize: 10 },
   unreadColor: { color: colors.neon },
   preview: { color: colors.muted, fontSize: 12, flex: 1, marginTop: 5 },
+  previewTyping: { color: colors.neon },
+  previewTick: { marginTop: 5, marginRight: 4 },
   badge: { minWidth: 19, height: 19, borderRadius: 10, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4, marginTop: 4 },
   badgeText: { color: colors.navy950, fontSize: 9, fontWeight: '900' },
   empty: { color: colors.muted, textAlign: 'center', marginTop: 40 },
   identity: { height: 44, borderTopWidth: 1, borderTopColor: colors.border, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 7 },
   onlineDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.neon },
   identityText: { color: colors.muted, fontSize: 11, flex: 1 },
-  conversation: { position: 'relative', flex: 1, minWidth: 0, backgroundColor: colors.navy950, overflow: 'visible' },
+  conversation: { position: 'relative', flex: 1, minWidth: 0, backgroundColor: '#040D16', overflow: 'visible' },
   dismissOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 10, backgroundColor: 'transparent', pointerEvents: 'auto' },
   chatHeader: { position: 'relative', height: 68, backgroundColor: colors.navy900, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, zIndex: 20 },
   person: { flex: 1 },
   personName: { color: colors.white, fontWeight: '800', fontSize: 15 },
   presence: { color: colors.muted, fontSize: 10, marginTop: 2 },
   presenceActive: { color: colors.neon },
+  presenceRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
+  presenceDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.neon },
+  deviceFlag: { position: 'absolute', top: 68, right: 26, zIndex: 6, alignItems: 'center' },
+  deviceFlagRope: { width: 1, height: 12, backgroundColor: 'rgba(120, 204, 255, 0.45)' },
+  deviceFlagBody: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 4, borderTopLeftRadius: 4, borderTopRightRadius: 4, borderBottomLeftRadius: 10, borderBottomRightRadius: 10, backgroundColor: colors.navy800, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.32)' },
+  deviceFlagText: { color: colors.neon, fontSize: 9, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
   headerAction: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
   encryption: { position: 'absolute', top: 80, zIndex: 2, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, height: 25, borderRadius: 5, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border },
   encryptionText: { color: colors.muted, fontSize: 9 },
-  messageList: { flex: 1 },
-  messageContent: { paddingHorizontal: '8%', paddingTop: 52, paddingBottom: 18, gap: 5 },
-  bubbleWrap: { maxWidth: '78%', position: 'relative', marginBottom: 6, zIndex: 12, elevation: 12, overflow: 'visible' },
-  mineWrap: { alignSelf: 'flex-end' },
-  theirsWrap: { alignSelf: 'flex-start' },
-  bubble: { paddingHorizontal: 11, paddingTop: 7, paddingBottom: 5, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(125, 220, 255, 0.22)', backgroundColor: 'rgba(16, 53, 79, 0.82)', shadowColor: '#79E6FF', shadowOpacity: 0.22, shadowRadius: 16, shadowOffset: { width: 0, height: 0 }, backdropFilter: 'blur(12px)' },
-  bubbleActive: { shadowColor: '#79E6FF', shadowOpacity: 0.35, shadowRadius: 18, shadowOffset: { width: 0, height: 0 } },
-  mine: { backgroundColor: 'rgba(18, 61, 92, 0.88)', borderBottomRightRadius: 6 },
-  theirs: { backgroundColor: 'rgba(22, 39, 57, 0.88)', borderBottomLeftRadius: 6 },
-  messageText: { color: colors.white, fontSize: 14, lineHeight: 20 },
-  replyPreview: { paddingVertical: 4, marginBottom: 6, borderLeftWidth: 2, borderLeftColor: colors.neon, paddingLeft: 8 },
-  replyPreviewText: { color: colors.neon, fontSize: 10, fontWeight: '700' },
+  messageList: { flex: 1, zIndex: 1 },
+  messageSearchBar: { position: 'absolute', top: 68, left: 0, right: 0, zIndex: 40, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: 'rgba(10, 19, 30, 0.97)', borderBottomWidth: 1, borderBottomColor: colors.border, overflow: 'hidden' },
+  messageSearchRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  messageSearchInput: { flex: 1, color: colors.white, fontSize: 13, minHeight: 30, outlineWidth: 0, outlineStyle: 'none' } as any,
+  searchNavWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  searchNavBtn: { width: 24, height: 24, borderRadius: 6, backgroundColor: colors.navy700, alignItems: 'center', justifyContent: 'center' },
+  messageContent: { paddingHorizontal: '4%', paddingTop: 22, paddingBottom: 6, gap: 6 },
+  bubbleWrap: { maxWidth: '85%', position: 'relative', marginBottom: 0, zIndex: 12, elevation: 12, overflow: 'visible', flexDirection: 'row', alignItems: 'flex-end', gap: 4, minWidth: 0 },
+  mineWrap: { alignSelf: 'flex-end', justifyContent: 'flex-end' },
+  theirsWrap: { alignSelf: 'flex-start', justifyContent: 'flex-start' },
+  bubble: {
+    paddingHorizontal: 11,
+    paddingTop: 5,
+    paddingBottom: 2,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(148, 174, 205, 0.18)',
+    backgroundColor: 'rgba(17, 34, 51, 0.72)',
+    overflow: 'visible',
+    shadowColor: 'rgba(0, 0, 0, 0.18)',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 1,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  bubbleActive: { borderColor: 'rgba(148, 174, 205, 0.26)', shadowOpacity: 0.18 },
+  replyJumpFlash: { borderColor: 'rgba(120, 214, 255, 0.9)', shadowColor: 'rgba(120, 214, 255, 0.8)', shadowOpacity: 0.95, shadowRadius: 14, elevation: 8 },
+  mine: { backgroundColor: 'rgba(26, 62, 87, 0.72)', borderColor: 'rgba(135, 170, 210, 0.2)', borderBottomRightRadius: 6 },
+  theirs: { backgroundColor: 'rgba(14, 25, 36, 0.74)', borderColor: 'rgba(135, 170, 210, 0.14)', borderBottomLeftRadius: 6 },
+  stickerBubble: { backgroundColor: 'transparent', borderWidth: 0, padding: 0, borderRadius: 0, overflow: 'visible', shadowOpacity: 0, elevation: 0 },
+  messageText: { color: colors.white, fontSize: 14, lineHeight: 20, flexShrink: 1 },
+  replyPreview: { paddingVertical: 4, marginBottom: 6, borderLeftWidth: 2, borderLeftColor: colors.neon, paddingLeft: 8, maxWidth: '100%' },
+  replyPreviewText: { color: colors.neon, fontSize: 10, fontWeight: '700', flexShrink: 1, lineHeight: 14 },
   attachment: { flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 180 },
   attachmentText: { color: colors.white, fontSize: 13, flexShrink: 1 },
-  meta: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 1, marginTop: 2, letterSpacing: -1 },
-  messageTime: { color: '#A9B9CB', fontSize: 8 },
-  expiry: { color: colors.blue, fontSize: 8 },
+  messageFlagRow: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 6, marginTop: 4, marginBottom: 2, paddingHorizontal: 1 },
+  meta: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 6, marginTop: 1, paddingHorizontal: 1 },
+  messageTime: { color: '#A9B9CB', fontSize: 10, fontWeight: '500' },
+  expiry: { color: colors.blue, fontSize: 10, fontWeight: '600' },
   tick: { color: colors.muted, fontSize: 10, fontWeight: '800' },
   readTick: { color: colors.blue },
   failedTick: { color: colors.danger },
-  composer: { position: 'relative', zIndex: 12, minHeight: 66, backgroundColor: 'rgba(9, 20, 31, 0.96)', borderTopWidth: 1, borderTopColor: 'rgba(120, 204, 255, 0.16)', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 14, paddingVertical: 9, shadowColor: '#67d3ff', shadowOpacity: 0.12, shadowRadius: 18, shadowOffset: { width: 0, height: -8 } },
+  composer: { position: 'relative', zIndex: 12, minHeight: 58, backgroundColor: 'rgba(9, 20, 31, 0.96)', borderTopWidth: 1, borderTopColor: 'rgba(120, 204, 255, 0.16)', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 14, paddingVertical: 1, boxShadow: '0 -8px 18px rgba(103, 211, 255, 0.12)' },
   composeAction: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: 'rgba(120, 204, 255, 0.08)', borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.18)' },
   optionsContainer: { flex: 1, minWidth: 0 },
-  inputShell: { flex: 1, minHeight: 46, maxHeight: 110, borderRadius: 14, backgroundColor: 'rgba(18, 33, 48, 0.96)', borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.22)', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, paddingVertical: 0, shadowColor: '#68d7ff', shadowOpacity: 0.16, shadowRadius: 12, shadowOffset: { width: 0, height: 0 } },
+  inputShell: { flex: 1, minHeight: 46, maxHeight: 110, borderRadius: 14, backgroundColor: 'rgba(18, 33, 48, 0.96)', borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.22)', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, paddingVertical: 0, boxShadow: '0 0 12px rgba(104, 215, 255, 0.16)' },
   input: { flex: 1, color: colors.white, fontSize: 14, height: 40, lineHeight: Platform.OS === 'web' ? (20 as any) : undefined, paddingVertical: 10, margin: 0, textAlignVertical: 'center' },
   optionsPanel: { backgroundColor: colors.navy800, borderRadius: 8, padding: 10, marginTop: 8, gap: 8 },
   optionLabel: { color: colors.muted, fontSize: 11, fontWeight: '700' },
@@ -1059,7 +1693,7 @@ const styles = StyleSheet.create({
   fontButton: { flex: 1, paddingVertical: 6, borderRadius: 6, backgroundColor: colors.navy700, alignItems: 'center' },
   fontButtonActive: { backgroundColor: colors.blue },
   fontButtonText: { color: colors.white, fontSize: 12, fontWeight: '600' },
-  send: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', shadowColor: '#6DF5C2', shadowOpacity: 0.7, shadowRadius: 16, shadowOffset: { width: 0, height: 0 } },
+  send: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 16px rgba(109, 245, 194, 0.7)' },
   voice: { backgroundColor: colors.blue },
   blank: { flex: 1, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 5, borderBottomColor: colors.neon },
   blankIcon: { width: 78, height: 78, borderRadius: 39, backgroundColor: colors.navy800, alignItems: 'center', justifyContent: 'center' },
@@ -1075,7 +1709,11 @@ const styles = StyleSheet.create({
   callMsgSub: { color: colors.muted, fontSize: 11, marginTop: 2 },
   callMsgSubMissed: { color: colors.danger },
   callMsgTime: { color: colors.muted, fontSize: 10, marginLeft: 8 },
-  topPopMenu: { position: 'absolute', top: 60, right: 16, zIndex: 300000, elevation: 300000, backgroundColor: 'rgba(16, 28, 40, 0.92)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', paddingVertical: 8, minWidth: 210, shadowColor: '#67d3ff', shadowOpacity: 0.32, shadowRadius: 28, shadowOffset: { width: 0, height: 12 }, overflow: 'visible', pointerEvents: 'auto' } as any,
+  systemRow: { alignSelf: 'center', alignItems: 'center', marginVertical: 6 },
+  systemPill: { backgroundColor: 'rgba(12, 19, 30, 0.9)', borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7 },
+  systemText: { color: colors.white, fontSize: 11, fontWeight: '700' },
+  systemStamp: { color: colors.muted, fontSize: 10, marginTop: 4 },
+  topPopMenu: { position: 'absolute', top: 60, right: 16, zIndex: 999999, elevation: 999999, backgroundColor: 'rgba(16, 28, 40, 1)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', paddingVertical: 8, minWidth: 210, boxShadow: '0 12px 28px rgba(103, 211, 255, 0.32)', overflow: 'visible', pointerEvents: 'auto' } as any,
   popMenuItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
   popMenuText: { color: colors.white, fontSize: 13, fontWeight: '700' },
   timerSection: { paddingHorizontal: 12, paddingTop: 6, paddingBottom: 8 },
@@ -1085,12 +1723,18 @@ const styles = StyleSheet.create({
   timerChipActive: { backgroundColor: colors.blue, borderColor: colors.blue },
   timerChipText: { color: colors.white, fontSize: 10, fontWeight: '700' },
   timerChipTextActive: { color: colors.navy950 },
-  emojiGrid: { position: 'relative', zIndex: 30, flexDirection: 'row', flexWrap: 'wrap', gap: 6, padding: 12, backgroundColor: 'rgba(19, 34, 53, 0.98)', borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.2)', shadowColor: '#67d3ff', shadowOpacity: 0.2, shadowRadius: 18, shadowOffset: { width: 0, height: 10 } },
+  emojiGrid: { position: 'relative', zIndex: 30, gap: 8, padding: 12, backgroundColor: 'rgba(19, 34, 53, 1)', borderRadius: 12, marginBottom: 8, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.2)', boxShadow: '0 10px 18px rgba(103, 211, 255, 0.2)' },
+  emojiGridInner: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  pickerSectionHeader: { marginTop: 4 },
+  pickerSectionTitle: { color: colors.muted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8 },
   emojiBtn: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy700 },
-  attachmentMenu: { position: 'relative', zIndex: 30, flexDirection: 'column', gap: 4, padding: 8, backgroundColor: 'rgba(19, 34, 53, 0.98)', borderRadius: 12, marginBottom: 8, minWidth: 180, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.2)', shadowColor: '#67d3ff', shadowOpacity: 0.2, shadowRadius: 18, shadowOffset: { width: 0, height: 10 } },
+  stickerGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  stickerBtn: { width: 62, height: 62, borderRadius: 14, backgroundColor: 'transparent', alignItems: 'center', justifyContent: 'center', borderWidth: 0 },
+  stickerImage: { width: 56, height: 56 },
+  attachmentMenu: { position: 'relative', zIndex: 30, flexDirection: 'column', gap: 4, padding: 8, backgroundColor: 'rgba(19, 34, 53, 1)', borderRadius: 12, marginBottom: 8, minWidth: 180, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.2)', boxShadow: '0 10px 18px rgba(103, 211, 255, 0.2)' },
   attachOption: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 8, backgroundColor: colors.navy700 },
   attachOptionText: { color: colors.white, fontSize: 13, fontWeight: '600' },
-  expandedFormatPanel: { position: 'relative', zIndex: 30, backgroundColor: 'rgba(19, 34, 53, 0.98)', borderRadius: 12, padding: 12, marginBottom: 8, gap: 10, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.2)', shadowColor: '#67d3ff', shadowOpacity: 0.2, shadowRadius: 18, shadowOffset: { width: 0, height: 10 } },
+  expandedFormatPanel: { position: 'relative', zIndex: 30, backgroundColor: 'rgba(19, 34, 53, 1)', borderRadius: 12, padding: 12, marginBottom: 8, gap: 10, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.2)', boxShadow: '0 10px 18px rgba(103, 211, 255, 0.2)' },
   formatSection: { gap: 6 },
   formatLabel: { color: colors.muted, fontSize: 11, fontWeight: '700' },
   colorRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
@@ -1103,26 +1747,44 @@ const styles = StyleSheet.create({
   recordingPill: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
   recordingText: { color: colors.danger, fontSize: 13, fontWeight: '700' },
   chatRowMenuBtn: { padding: 6, marginLeft: 4, borderRadius: 8, backgroundColor: 'rgba(120, 204, 255, 0.08)', borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.16)' },
-  rowContextMenu: { position: 'absolute', top: 40, right: 12, zIndex: 300000, elevation: 300000, backgroundColor: 'rgba(16, 28, 40, 0.94)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', paddingVertical: 8, minWidth: 170, shadowColor: '#67d3ff', shadowOpacity: 0.34, shadowRadius: 28, shadowOffset: { width: 0, height: 12 }, pointerEvents: 'auto', overflow: 'visible' } as any,
+  rowContextMenu: { position: 'absolute', top: 40, right: 12, zIndex: 9999999, elevation: 9999999, backgroundColor: 'rgba(16, 28, 40, 1)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', paddingVertical: 8, minWidth: 170, boxShadow: '0 12px 28px rgba(103, 211, 255, 0.34)', pointerEvents: 'auto', overflow: 'visible' } as any,
   ctxItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10 },
   ctxText: { color: colors.white, fontSize: 12, fontWeight: '700' },
-  messageMenuButton: { position: 'absolute', top: 8, right: -12, width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(10,16,26,0.65)', alignItems: 'center', justifyContent: 'center', zIndex: 99 },
-  messageActionMenu: { position: 'absolute', zIndex: 300000, elevation: 300000, backgroundColor: 'rgba(16, 28, 40, 0.94)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', paddingVertical: 8, minWidth: 154, shadowColor: '#67d3ff', shadowOpacity: 0.34, shadowRadius: 28, shadowOffset: { width: 0, height: 12 }, overflow: 'visible', pointerEvents: 'auto' },
+  mobileHeader: { height: 56, paddingHorizontal: 12, gap: 8, zIndex: 1000, elevation: 1000, borderBottomWidth: 1, borderBottomColor: colors.border },
+  mobileBackButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
+  mobilePersonInfo: { flex: 1, justifyContent: 'center', paddingHorizontal: 8 },
+  mobileMenuButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
+  mobileTopMenu: { top: 52, right: 8, minWidth: 180 },
+  mobileEmojiGrid: { paddingVertical: 8, maxHeight: 300, overflow: 'scroll' },
+  mobileEmojiGridInner: { gap: 6, flexWrap: 'wrap', justifyContent: 'center' },
+  mobileEmojiBtn: { width: 40, height: 40, borderRadius: 8, backgroundColor: colors.navy700, alignItems: 'center', justifyContent: 'center' },
+  mobileStickerGrid: { gap: 8, justifyContent: 'center', flexWrap: 'wrap' },
+  mobileStickerBtn: { width: 64, height: 64, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  mobileStickerImage: { width: 50, height: 50 },
+  messageMenuButton: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.1)', alignItems: 'center', justifyContent: 'center', zIndex: 999, padding: 4 },
+  messageActionMenu: { position: 'absolute', zIndex: 9999999, elevation: 9999999, backgroundColor: 'rgba(16, 28, 40, 1)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', paddingVertical: 8, minWidth: 154, boxShadow: '0 12px 28px rgba(103, 211, 255, 0.34)', overflow: 'visible', pointerEvents: 'auto' },
   actionRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10 },
   actionText: { color: colors.white, fontSize: 12, fontWeight: '700' },
   actionIcon: { fontSize: 14 },
   reactionStrip: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 6, marginBottom: 2 },
   reactionPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 4, borderRadius: 999, backgroundColor: 'rgba(122, 209, 255, 0.16)', borderWidth: 1, borderColor: 'rgba(122, 209, 255, 0.25)' },
   reactionText: { fontSize: 11 },
+  replySwipeAction: { width: 26, backgroundColor: 'transparent' },
   reactionCount: { color: colors.white, fontSize: 10, fontWeight: '700' },
   replyBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.navy800, borderTopWidth: 1, borderTopColor: colors.border, paddingHorizontal: 16, paddingVertical: 10 },
   replyContext: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   replyText: { color: colors.white, fontSize: 12, fontWeight: '700' },
   // PHOTO & VOICE NOTE STYLES
   photoThumbnail: { width: 240, height: 180, borderRadius: 8, marginTop: 2, marginBottom: 4 },
+  videoBubbleContainer: { width: 260, maxWidth: '100%', maxHeight: 340, marginTop: 2, marginBottom: 4, borderRadius: 10, overflow: 'hidden', backgroundColor: '#050D16', alignItems: 'center', justifyContent: 'center' },
+  videoScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(3, 11, 20, 0.18)' },
+  videoPlayBadge: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(109, 245, 194, 0.95)', alignItems: 'center', justifyContent: 'center' },
+  videoDurationPill: { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, backgroundColor: 'rgba(3, 11, 20, 0.66)' },
+  videoDurationText: { color: colors.white, fontSize: 11, fontWeight: '700' },
+  stickerImageOnly: { width: 132, height: 132, borderRadius: 0, backgroundColor: 'transparent' },
   photoCaption: { color: colors.white, fontSize: 12, marginTop: 4 },
-  vnContainer: { flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 250, paddingVertical: 4, backgroundColor: 'rgba(118, 215, 255, 0.08)', borderRadius: 16, paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(118, 215, 255, 0.24)', shadowColor: '#67d3ff', shadowOpacity: 0.18, shadowRadius: 10 },
-  vnPlayBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', shadowColor: '#4CE3A0', shadowOpacity: 0.7, shadowRadius: 8 },
+  vnContainer: { flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 250, paddingVertical: 4, backgroundColor: 'rgba(118, 215, 255, 0.08)', borderRadius: 16, paddingHorizontal: 10, borderWidth: 1, borderColor: 'rgba(118, 215, 255, 0.24)', boxShadow: '0 0 10px rgba(103, 211, 255, 0.18)' },
+  vnPlayBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', boxShadow: '0 0 8px rgba(76, 227, 160, 0.7)' },
   vnTrackArea: { flex: 1, justifyContent: 'center' },
   vnTrackBar: { height: 8, backgroundColor: 'rgba(255,255,255,0.18)', borderRadius: 999, position: 'relative', justifyContent: 'center', overflow: 'visible' },
   vnTrackFill: { height: '100%', backgroundColor: 'linear-gradient(90deg, #8CE7FF 0%, #60F0C5 100%)' as any, borderRadius: 999 },
@@ -1131,10 +1793,21 @@ const styles = StyleSheet.create({
   vnSpeedPill: { paddingHorizontal: 7, paddingVertical: 3, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.14)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
   vnSpeedText: { color: colors.white, fontSize: 10, fontWeight: '800' },
   // IMAGE MODAL STYLES
-  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  imageModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', alignItems: 'center', justifyContent: 'center', paddingTop: 72, paddingBottom: 96, paddingHorizontal: 20 },
   imageModalClose: { position: 'absolute', top: 20, right: 20, zIndex: 10, padding: 8, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.2)' },
-  imageModalContent: { width: '100%', height: '100%', maxWidth: 900, maxHeight: 700 },
-  forwardModalOverlay: { position: 'absolute', top: '50%', left: '50%', marginTop: -200, marginLeft: -180, width: 360, maxHeight: 400, borderRadius: 16, backgroundColor: colors.navy800, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', shadowColor: '#67d3ff', shadowOpacity: 0.34, shadowRadius: 28, shadowOffset: { width: 0, height: 12 }, zIndex: 400000, elevation: 400000, overflow: 'hidden' },
+  mediaModalFrame: { flex: 1, width: '100%', maxWidth: 980, alignSelf: 'center', alignItems: 'center', justifyContent: 'center', borderRadius: 14, overflow: 'hidden' },
+  mediaModalContent: { width: '100%', maxWidth: '100%', maxHeight: '100%' },
+  mediaModalImage: { width: '100%', height: '100%' },
+  previewActionsRow: { position: 'absolute', bottom: 28, left: 0, right: 0, alignItems: 'center' },
+  previewDownloadButton: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999, backgroundColor: 'rgba(13, 22, 35, 0.84)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
+  previewDownloadText: { color: colors.white, fontSize: 13, fontWeight: '700' },
+  profileModalBackdrop: { flex: 1, backgroundColor: 'rgba(2, 6, 16, 0.78)', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  profileModalCard: { width: '100%', maxWidth: 360, backgroundColor: colors.navy900, borderRadius: 24, borderWidth: 1, borderColor: colors.border, paddingTop: 24, paddingBottom: 18, paddingHorizontal: 18, alignItems: 'center', position: 'relative' },
+  profileModalClose: { position: 'absolute', top: 12, right: 12, width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  profileModalName: { color: colors.white, fontSize: 24, fontWeight: '900', marginTop: 18 },
+  profileModalMacro: { color: colors.blue, fontSize: 13, fontWeight: '800', marginTop: 6 },
+  profileModalMeta: { color: colors.muted, fontSize: 11, marginTop: 10 },
+  forwardModalOverlay: { position: 'absolute', top: '50%', left: '50%', marginTop: -200, marginLeft: -180, width: 360, maxHeight: 400, borderRadius: 16, backgroundColor: colors.navy800, borderWidth: 1, borderColor: 'rgba(122, 224, 255, 0.34)', boxShadow: '0 12px 28px rgba(103, 211, 255, 0.34)', zIndex: 400000, elevation: 400000, overflow: 'hidden' },
   forwardModal: { flex: 1, flexDirection: 'column' },
   forwardModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
   forwardModalTitle: { color: colors.white, fontSize: 16, fontWeight: '800' },

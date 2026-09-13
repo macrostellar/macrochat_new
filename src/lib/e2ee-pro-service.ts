@@ -5,6 +5,8 @@
  * Integrates with Supabase and the e2ee-pro crypto library.
  */
 
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import {
   generateUserIdentityKeyPair,
   generateDeviceEphemeralKeyPair,
@@ -16,6 +18,7 @@ import {
   encryptMessageE2EEPro,
   decryptMessageE2EEPro,
   decryptMessageWithSharedSecret,
+  decryptMessageWithSelfIdentityKey,
   computeFingerprint,
   verifyDeviceCertificate,
   type UserKeyPair,
@@ -38,6 +41,7 @@ export class E2EEProService {
   private userIdentityKeyPair: UserKeyPair | null = null;
   private deviceKeyPair: DeviceKeyPair | null = null;
   private sessionKeys: Map<string, SessionKey> = new Map();
+  private initPromise: Promise<void> | null = null;
 
   constructor(userId: string, deviceId: string) {
     this.userId = userId;
@@ -53,6 +57,15 @@ export class E2EEProService {
    * Loads or creates identity keys, device keys, publishes key bundle, and loads active session keys.
    */
   async initialize(): Promise<void> {
+    // Dedupe concurrent init calls (e.g. effect double-invocation) into a single run.
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = this.runInitialize().finally(() => {
+      this.initPromise = null;
+    });
+    return this.initPromise;
+  }
+
+  private async runInitialize(): Promise<void> {
     try {
       // Load or create identity keys
       const identityKeys = await this.loadOrCreateIdentityKeys();
@@ -90,14 +103,17 @@ export class E2EEProService {
         for (const row of data) {
           const peerUserId = row.user_id === this.userId ? row.peer_user_id : row.user_id;
           const peerDeviceId = row.user_id === this.userId ? row.peer_device_id : row.device_id;
-          const sessionKey = `${peerUserId}:${peerDeviceId}`;
-          this.sessionKeys.set(sessionKey, {
+          const sessionObj: SessionKey = {
             sharedSecret: row.shared_secret,
             chainKey: row.chain_key,
             messageKeyCounter: row.message_key_counter,
             createdAt: new Date(row.created_at).getTime(),
             peerDeviceId,
-          });
+          };
+          // Store by unique session ID and unique shared secret to prevent overwriting older session keys
+          this.sessionKeys.set(row.id, sessionObj);
+          this.sessionKeys.set(row.shared_secret, sessionObj);
+          this.sessionKeys.set(`${peerUserId}:${peerDeviceId}`, sessionObj);
         }
       }
     } catch (error) {
@@ -120,34 +136,55 @@ export class E2EEProService {
         .select('*')
         .eq('user_id', this.userId)
         .eq('is_active', true)
-        .single();
+        .maybeSingle();
 
-      if (error && error.code === 'PGRST116') {
-        // No keys found, create new ones
-        const newKeys = generateUserIdentityKeyPair();
+      if (error) throw error;
 
-        // Save to database
-        await supabase.from('macrochat_user_identity_keys').insert({
+      if (data) {
+        return {
+          identityPublicKey: data.identity_public_key,
+          identitySecretKey: data.identity_secret_key,
+          fingerprint: data.fingerprint,
+          createdAt: new Date(data.created_at).getTime(),
+        };
+      }
+
+      // No active key row yet. Upsert (ignoring a concurrent duplicate insert from
+      // another init call) instead of a plain insert, which would 409 on a race.
+      const newKeys = generateUserIdentityKeyPair();
+      const { data: inserted, error: insertError } = await supabase
+        .from('macrochat_user_identity_keys')
+        .upsert({
           user_id: this.userId,
           identity_public_key: newKeys.identityPublicKey,
           identity_secret_key: newKeys.identitySecretKey,
           fingerprint: newKeys.fingerprint,
           created_at: new Date(newKeys.createdAt),
           is_active: true,
-        });
+        }, { onConflict: 'user_id', ignoreDuplicates: true })
+        .select('*')
+        .maybeSingle();
 
-        return newKeys;
+      if (insertError) throw insertError;
+      if (inserted) return newKeys;
+
+      // Another call already created the row; fetch the authoritative keys.
+      const { data: existing, error: existingError } = await supabase
+        .from('macrochat_user_identity_keys')
+        .select('*')
+        .eq('user_id', this.userId)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if (existing) {
+        return {
+          identityPublicKey: existing.identity_public_key,
+          identitySecretKey: existing.identity_secret_key,
+          fingerprint: existing.fingerprint,
+          createdAt: new Date(existing.created_at).getTime(),
+        };
       }
 
-      if (error) throw error;
-
-      // Return loaded keys
-      return {
-        identityPublicKey: data.identity_public_key,
-        identitySecretKey: data.identity_secret_key,
-        fingerprint: data.fingerprint,
-        createdAt: new Date(data.created_at).getTime(),
-      };
+      return newKeys;
     } catch (error) {
       console.error('Failed to load/create identity keys:', error);
       throw error;
@@ -155,7 +192,7 @@ export class E2EEProService {
   }
 
   /**
-   * Load device ephemeral keys from database, or create new ones.
+   * Load device ephemeral keys from local storage/database, or create new ones.
    */
   async loadOrCreateDeviceKeys(): Promise<DeviceKeyPair> {
     try {
@@ -163,24 +200,41 @@ export class E2EEProService {
         throw new Error('Identity keys not initialized');
       }
 
-      // Try to load from database
+      const storageKey = `macrochat.device_keypair.${this.userId}.${this.deviceId}`;
+      try {
+        const raw = Platform.OS === 'web'
+          ? (typeof localStorage !== 'undefined' ? localStorage.getItem(storageKey) : null)
+          : await SecureStore.getItemAsync(storageKey);
+        if (raw) {
+          const cachedKeys = JSON.parse(raw) as DeviceKeyPair;
+          if (cachedKeys && cachedKeys.ephemeralPublicKey && cachedKeys.ephemeralSecretKey) {
+            return cachedKeys;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to read device keys from storage:', e);
+      }
+
+      // Try to load device record from database
       const { data, error } = await supabase
         .from('macrochat_devices')
         .select('*')
         .eq('user_id', this.userId)
         .eq('device_id', this.deviceId)
         .eq('is_active', true)
-        .single();
+        .maybeSingle();
 
-      if (error && error.code === 'PGRST116') {
-        // No device keys found, create new ones
-        const newKeys = generateDeviceEphemeralKeyPair(
-          this.deviceId,
-          this.userIdentityKeyPair.identitySecretKey
-        );
+      if (error) throw error;
 
-        // Save to database
-        await supabase.from('macrochat_devices').insert({
+      const newKeys = generateDeviceEphemeralKeyPair(
+        this.deviceId,
+        this.userIdentityKeyPair.identitySecretKey
+      );
+
+      if (!data) {
+        // Upsert so a concurrent init call racing on the same (user_id, device_id) pair
+        // updates the row instead of hitting a unique-constraint conflict.
+        const { error: upsertError } = await supabase.from('macrochat_devices').upsert({
           user_id: this.userId,
           device_id: this.deviceId,
           device_name: this.getDeviceName(),
@@ -190,27 +244,31 @@ export class E2EEProService {
           created_at: new Date(newKeys.createdAt),
           is_active: true,
           is_verified: false,
-        });
-
-        return newKeys;
+        }, { onConflict: 'user_id,device_id' });
+        if (upsertError) console.warn('Failed to upsert device record:', upsertError.message);
+      } else {
+        // Device record exists, update public key and signature
+        const { error: updateError } = await supabase.from('macrochat_devices').update({
+          ephemeral_public_key: newKeys.ephemeralPublicKey,
+          ephemeral_signature: newKeys.signedKeySignature,
+          device_fingerprint: computeFingerprint(newKeys.ephemeralPublicKey),
+        }).eq('id', data.id);
+        if (updateError) console.warn('Failed to update device record:', updateError.message);
       }
 
-      if (error) throw error;
+      // Persist keypair in local storage so this device reuses the same ephemeral secret key across reloads
+      try {
+        const json = JSON.stringify(newKeys);
+        if (Platform.OS === 'web') {
+          if (typeof localStorage !== 'undefined') localStorage.setItem(storageKey, json);
+        } else {
+          await SecureStore.setItemAsync(storageKey, json);
+        }
+      } catch (e) {
+        console.warn('Failed to save device keys to storage:', e);
+      }
 
-      // If loaded from DB, generate fresh in-memory ephemeral keypair for this active device session
-      // (or use existing if valid keypair present)
-      const freshEphemeral = generateDeviceEphemeralKeyPair(
-        this.deviceId,
-        this.userIdentityKeyPair.identitySecretKey
-      );
-
-      return {
-        ephemeralPublicKey: freshEphemeral.ephemeralPublicKey,
-        ephemeralSecretKey: freshEphemeral.ephemeralSecretKey,
-        deviceId: data.device_id,
-        createdAt: new Date(data.created_at).getTime(),
-        signedKeySignature: freshEphemeral.signedKeySignature,
-      };
+      return newKeys;
     } catch (error) {
       console.error('Failed to load/create device keys:', error);
       throw error;
@@ -243,7 +301,7 @@ export class E2EEProService {
         device_fingerprint: computeFingerprint(bundle.ephemeralKey),
         published_at: new Date(bundle.timestamp),
         is_active: true,
-      });
+      }, { onConflict: 'user_id,device_id' });
 
       console.log('X3DH key bundle published');
     } catch (error) {
@@ -302,9 +360,8 @@ export class E2EEProService {
 
       // Save session to database
       const sessionKey = `${peerUserId}:${peerDeviceId}`;
-      this.sessionKeys.set(sessionKey, session);
 
-      await supabase.from('macrochat_session_keys').upsert({
+      const { data: inserted } = await supabase.from('macrochat_session_keys').upsert({
         user_id: this.userId,
         peer_user_id: peerUserId,
         device_id: this.deviceId,
@@ -315,7 +372,12 @@ export class E2EEProService {
         x3dh_bundle_id: peerBundle.id,
         created_at: new Date(session.createdAt),
         is_active: true,
-      });
+      }).select('id').single();
+
+      const keyId = inserted?.id || `sess-${Date.now()}`;
+      this.sessionKeys.set(keyId, session);
+      this.sessionKeys.set(sharedSecret, session);
+      this.sessionKeys.set(sessionKey, session);
 
       console.log(`Session established with ${peerUserId}:${peerDeviceId}`);
       return session;
@@ -335,30 +397,38 @@ export class E2EEProService {
     if (this.sessionKeys.has(sessionKey)) {
       return this.sessionKeys.get(sessionKey)!;
     }
+    for (const session of this.sessionKeys.values()) {
+      if (session.peerDeviceId === peerDeviceId) {
+        return session;
+      }
+    }
 
-    // Try to load from database
+    // Try to load from database (initiated by me or initiated by peer)
     const { data, error } = await supabase
       .from('macrochat_session_keys')
       .select('*')
-      .eq('user_id', this.userId)
-      .eq('peer_user_id', peerUserId)
-      .eq('device_id', this.deviceId)
-      .eq('peer_device_id', peerDeviceId)
+      .or(`and(user_id.eq.${this.userId},peer_user_id.eq.${peerUserId}),and(user_id.eq.${peerUserId},peer_user_id.eq.${this.userId})`)
       .eq('is_active', true)
-      .single();
+      .order('created_at', { ascending: false });
 
-    if (!error && data) {
-      // Found session in database
-      const session: SessionKey = {
-        sharedSecret: data.shared_secret,
-        chainKey: data.chain_key,
-        messageKeyCounter: data.message_key_counter,
-        createdAt: new Date(data.created_at).getTime(),
-        peerDeviceId,
-      };
+    if (!error && Array.isArray(data) && data.length > 0) {
+      let newestSession: SessionKey | null = null;
+      for (const row of data) {
+        const actualPeerDeviceId = row.user_id === this.userId ? row.peer_device_id : row.device_id;
+        const session: SessionKey = {
+          sharedSecret: row.shared_secret,
+          chainKey: row.chain_key,
+          messageKeyCounter: row.message_key_counter,
+          createdAt: new Date(row.created_at).getTime(),
+          peerDeviceId: actualPeerDeviceId,
+        };
 
-      this.sessionKeys.set(sessionKey, session);
-      return session;
+        this.sessionKeys.set(row.id, session);
+        this.sessionKeys.set(row.shared_secret, session);
+        this.sessionKeys.set(`${peerUserId}:${actualPeerDeviceId}`, session);
+        if (!newestSession) newestSession = session;
+      }
+      if (newestSession) return newestSession;
     }
 
     // No session found, initiate new one
@@ -473,20 +543,37 @@ export class E2EEProService {
   }
 
   /**
-   * Attempt synchronous decryption of ciphertext using cached session keys with peer.
+   * Attempt synchronous decryption of ciphertext using cached session keys or self-encryption key with peer.
    */
   decryptCiphertextSync(
     ciphertext: string,
     nonce: string,
     peerUserId: string
   ): string | null {
-    if (!ciphertext || !nonce || !peerUserId) return null;
-    for (const [key, session] of this.sessionKeys.entries()) {
-      if (key.startsWith(`${peerUserId}:`)) {
-        const decrypted = decryptMessageWithSharedSecret(ciphertext, nonce, session.sharedSecret);
-        if (decrypted) return decrypted;
-      }
+    if (!ciphertext || !nonce) return null;
+    
+    // Deduplicate shared secrets in memory
+    const uniqueSecrets = new Set<string>();
+    for (const session of this.sessionKeys.values()) {
+      if (session.sharedSecret) uniqueSecrets.add(session.sharedSecret);
     }
+
+    // Try every active session shared secret
+    for (const secret of uniqueSecrets) {
+      const decrypted = decryptMessageWithSharedSecret(ciphertext, nonce, secret);
+      if (decrypted) return decrypted;
+    }
+
+    // Fallback: try self-identity derived key for self-sent messages
+    if (this.userIdentityKeyPair?.identitySecretKey) {
+      const decrypted = decryptMessageWithSelfIdentityKey(
+        ciphertext,
+        nonce,
+        this.userIdentityKeyPair.identitySecretKey
+      );
+      if (decrypted) return decrypted;
+    }
+
     return null;
   }
 
@@ -651,12 +738,21 @@ export class E2EEProService {
       this.sessionKeys.set(key, session);
     });
   }
+
+  matches(userId: string, deviceId: string): boolean {
+    return this.userId === userId && this.deviceId === deviceId;
+  }
 }
 
 // Export a singleton instance per user/device
 let e2eeProService: E2EEProService | null = null;
 
 export function initializeE2EEProService(userId: string, deviceId: string): E2EEProService {
+  // Reuse the existing instance for the same user/device instead of creating a fresh one,
+  // so a second concurrent call reuses the in-flight initialize() promise.
+  if (e2eeProService && e2eeProService.matches(userId, deviceId)) {
+    return e2eeProService;
+  }
   e2eeProService = new E2EEProService(userId, deviceId);
   return e2eeProService;
 }

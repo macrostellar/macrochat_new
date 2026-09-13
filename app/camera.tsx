@@ -34,12 +34,12 @@ export default function CameraScreen() {
   const [posting, setPosting] = useState(false);
   const [activeFilter, setActiveFilter] = useState(FILTERS[0]);
 
-  const ensurePermissions = async () => {
+  const ensurePermissions = async ({ requireMicrophone = false }: { requireMicrophone?: boolean } = {}) => {
     if (!cameraPermission?.granted) {
       const cameraResult = await requestCameraPermission();
       if (!cameraResult.granted) return false;
     }
-    if (!micPermission?.granted) {
+    if (requireMicrophone && !micPermission?.granted) {
       const micResult = await requestMicPermission();
       if (!micResult.granted) return false;
     }
@@ -48,7 +48,7 @@ export default function CameraScreen() {
 
   const takePhoto = async () => {
     const allowed = await ensurePermissions();
-    if (!allowed) return Alert.alert('Permission needed', 'Enable camera and microphone permissions first.');
+    if (!allowed) return Alert.alert('Permission needed', 'Enable camera permission to capture photos.');
     const result = await cameraRef.current?.takePictureAsync({ quality: 0.8 });
     if (result?.uri) {
       setPreviewKind('photo');
@@ -58,8 +58,8 @@ export default function CameraScreen() {
 
   const startOrStopRecording = async () => {
     if (!recording) {
-      const allowed = await ensurePermissions();
-      if (!allowed) return Alert.alert('Permission needed', 'Enable camera and microphone permissions first.');
+      const allowed = await ensurePermissions({ requireMicrophone: true });
+      if (!allowed) return Alert.alert('Permission needed', 'Enable camera and microphone permissions before recording video.');
       setRecording(true);
       const video = await cameraRef.current?.recordAsync({ maxDuration: 20 });
       setRecording(false);
@@ -110,7 +110,7 @@ export default function CameraScreen() {
     }
   };
 
-  if (!cameraPermission) return <View style={styles.page} />;
+  if (!cameraPermission) return <View style={styles.page}><ActivityIndicator color={colors.neon} /></View>;
 
   return (
     <View style={styles.page}>

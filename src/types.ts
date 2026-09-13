@@ -1,14 +1,59 @@
+export type ProfileStatus = 'online' | 'busy' | 'away' | 'offline';
+
+export type TextSizePreset = 'compact' | 'comfortable' | 'large' | 'xl';
+export type ChatWallpaperPreset = 'midnight' | 'obsidian' | 'aurora' | 'graphite';
+export type ChatFontFamily = 'system' | 'figtree' | 'space-grotesk' | 'instrument-serif' | 'oswald' | 'dancing-script';
+
+export type AppearanceSettings = {
+  textSize: TextSizePreset;
+  wallpaper: ChatWallpaperPreset;
+  fontFamily: ChatFontFamily;
+};
+
+export const defaultAppearanceSettings: AppearanceSettings = {
+  textSize: 'comfortable',
+  wallpaper: 'midnight',
+  fontFamily: 'system',
+};
+
+export type NotificationPreferences = {
+  messages: 'on' | 'mentions' | 'off';
+  groups: 'on' | 'mentions' | 'off';
+  calls: 'on' | 'off';
+  status: 'on' | 'mentions' | 'off';
+  updates: 'on' | 'off';
+  sound: boolean;
+  vibration: boolean;
+  preview: boolean;
+  badge: boolean;
+  backgroundSync: boolean;
+};
+
+export const defaultNotificationPreferences: NotificationPreferences = {
+  messages: 'on',
+  groups: 'on',
+  calls: 'on',
+  status: 'mentions',
+  updates: 'on',
+  sound: true,
+  vibration: true,
+  preview: true,
+  badge: true,
+  backgroundSync: true,
+};
+
 export type Profile = {
   id: string;
   macroId: string;
   displayName: string;
   avatarColor: string;
   avatarUrl?: string;
+  status: ProfileStatus;
 };
 
 export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 
-export type MessageKind = 'text' | 'image' | 'file' | 'voice' | 'system' | 'call';
+export type MessageKind = 'text' | 'image' | 'video' | 'file' | 'voice' | 'system' | 'call';
 
 export type Message = {
   id: string;
@@ -31,6 +76,8 @@ export type Message = {
   status: MessageStatus;
   replyTo?: string;
   reaction?: string;
+  pinned?: boolean;
+  starred?: boolean;
   textColor?: string;
   fontStyle?: 'normal' | 'italic';
   fontFamily?: string;
@@ -76,6 +123,7 @@ export type Chat = {
   avatarColor: string;
   avatarUrl?: string;
   online: boolean;
+  peerDevice?: 'mobile' | 'desktop' | 'web';
   lastSeen: string;
   unread: number;
   isGroup?: boolean;

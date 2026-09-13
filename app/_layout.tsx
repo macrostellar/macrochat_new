@@ -1,4 +1,5 @@
 import 'react-native-gesture-handler';
+import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
@@ -8,6 +9,15 @@ import { AppProvider } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 
 export default function RootLayout() {
+  // react-native-web leaves the browser focus ring on inputs; strip it globally.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const style = document.createElement('style');
+    style.textContent = 'input:focus,textarea:focus,[contenteditable]:focus{outline:none!important;box-shadow:none!important;}';
+    document.head.appendChild(style);
+    return () => style.remove();
+  }, []);
+
   return (
     <AppProvider>
       <StatusBar style="light" />
@@ -31,9 +41,12 @@ export default function RootLayout() {
         <Stack.Screen name="scan-macro" options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
         <Stack.Screen name="camera" options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
         <Stack.Screen name="security/mfa" options={{ headerShown: false }} />
-        <Stack.Screen name="security/e2ee" options={{ headerShown: false }} />
         <Stack.Screen name="security/account" options={{ headerShown: false }} />
         <Stack.Screen name="security/privacy" options={{ headerShown: false }} />
+        <Stack.Screen name="security/notifications" options={{ headerShown: false }} />
+        <Stack.Screen name="security/appearance" options={{ headerShown: false }} />
+        <Stack.Screen name="security/storage" options={{ headerShown: false }} />
+        <Stack.Screen name="security/e2ee" options={{ headerShown: false }} />
       </Stack>
     </AppProvider>
   );

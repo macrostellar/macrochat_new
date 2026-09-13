@@ -6,7 +6,7 @@ alter table public.macrochat_conversation_members
 
 alter table public.macrochat_conversations
   add column if not exists message_ttl_seconds integer
-  check (message_ttl_seconds is null or message_ttl_seconds in (3600, 86400, 604800, 2592000));
+  check (message_ttl_seconds is null or message_ttl_seconds in (60, 3600, 86400, 604800, 2592000));
 
 alter table public.macrochat_messages
   add column if not exists expires_at timestamptz;
@@ -16,8 +16,9 @@ create table if not exists public.macrochat_user_privacy (
   read_receipts boolean not null default true,
   share_typing_activity boolean not null default true,
   allow_incoming_calls boolean not null default true,
+  show_device_status boolean not null default true,
   default_message_ttl_seconds integer
-    check (default_message_ttl_seconds is null or default_message_ttl_seconds in (3600, 86400, 604800, 2592000)),
+    check (default_message_ttl_seconds is null or default_message_ttl_seconds in (60, 3600, 86400, 604800, 2592000)),
   updated_at timestamptz not null default now()
 );
 
@@ -165,7 +166,7 @@ create or replace function public.macrochat_set_disappearing_timer(ttl_seconds i
 returns void language plpgsql security definer set search_path = public
 as $$
 begin
-  if ttl_seconds is not null and ttl_seconds not in (3600, 86400, 604800, 2592000) then
+  if ttl_seconds is not null and ttl_seconds not in (60, 3600, 86400, 604800, 2592000) then
     raise exception using message = 'unsupported_disappearing_timer';
   end if;
   insert into public.macrochat_user_privacy (user_id, default_message_ttl_seconds, updated_at)

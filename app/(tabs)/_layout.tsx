@@ -10,7 +10,9 @@ const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
 
 export default function TabLayout() {
   const { width } = useWindowDimensions();
-  const { profile, loading } = useApp();
+  const { profile, loading, updates } = useApp();
+  const unreadStatusCount = updates.filter((item) => !item.mine && !item.viewed).length;
+
   if (!loading && !profile) return <Redirect href="/" />;
   return (
     <Tabs screenOptions={({ route }) => ({
@@ -22,6 +24,7 @@ export default function TabLayout() {
         : { backgroundColor: colors.black, borderTopColor: colors.blueDark, height: 78, paddingTop: 8 },
       tabBarLabelStyle: { fontSize: 11, fontWeight: '700', paddingBottom: 9 },
       tabBarIcon: ({ color, size }) => <Ionicons name={icons[route.name] ?? 'ellipse'} color={color} size={size} />,
+      tabBarBadge: route.name === 'updates' && unreadStatusCount > 0 ? unreadStatusCount : undefined,
     })}>
       <Tabs.Screen name="index" options={{ title: 'Chats' }} />
       <Tabs.Screen name="updates" options={{ title: 'Updates' }} />

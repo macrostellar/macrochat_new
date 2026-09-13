@@ -9,6 +9,7 @@ export const colors = {
   blue: '#3C8ED0',
   blueDark: '#2A6FA7',
   neon: '#39FF14',
+  yellow: '#F5C76B',
   black: '#000000',
   glowBlue: 'rgba(60, 142, 208, 0.40)',
   glowNeon: 'rgba(57, 255, 20, 0.30)',

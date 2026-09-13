@@ -28,6 +28,7 @@ export default function UpdatesScreen() {
 
   const mine = useMemo(() => updates.filter((item) => item.mine), [updates]);
   const others = useMemo(() => updates.filter((item) => !item.mine), [updates]);
+  const unreadStatusCount = useMemo(() => others.filter((item) => !item.viewed).length, [others]);
   const viewing = viewingId ? (galleryMode ? mine.find((m) => m.id === viewingId) : updates.find((item) => item.id === viewingId)) : null;
 
   // Debug logging
@@ -121,7 +122,10 @@ export default function UpdatesScreen() {
       </View>
 
       {/* CONTACTS UPDATES SECTION */}
-      <Text style={styles.section}>FROM CONTACTS</Text>
+      <View style={styles.sectionHeader}>
+        <Text style={styles.section}>FROM CONTACTS</Text>
+        {unreadStatusCount > 0 && <View style={styles.unreadBadge}><Text style={styles.unreadBadgeText}>{unreadStatusCount > 9 ? '9+' : unreadStatusCount}</Text></View>}
+      </View>
       {others.length === 0 ? (
         <Text style={styles.empty}>No updates from contacts yet.</Text>
       ) : (
@@ -253,6 +257,8 @@ const styles = StyleSheet.create({
   section2: { marginVertical: 20, paddingHorizontal: 20, paddingBottom: 10 },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   sectionTitle: { color: colors.white, fontWeight: '900', fontSize: 16 },
+  unreadBadge: { minWidth: 22, height: 22, borderRadius: 11, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  unreadBadgeText: { color: colors.navy950, fontSize: 11, fontWeight: '900' },
   uploadButton: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: colors.navy800 },
   uploadButtonText: { color: colors.neon, fontWeight: '800', fontSize: 12 },
   myUpdatesContainer: { gap: 12, paddingRight: 8 },

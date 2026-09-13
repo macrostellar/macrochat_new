@@ -3,7 +3,8 @@ import { Alert, AppState, Platform } from 'react-native';
 import { DEFAULT_PROFILE_AVATARS } from '@/components/Avatar';
 import * as SecureStore from 'expo-secure-store';
 import * as FileSystem from 'expo-file-system';
-import type { CallHistoryEntry, CallOutcome, Chat, Message, MessageKind, Profile, UpdateItem, UpdateReaction, UpdateComment, MessageReaction, MessageComment } from '@/types';
+import type { AppearanceSettings, CallHistoryEntry, CallOutcome, Chat, Message, MessageKind, Profile, ProfileStatus, UpdateItem, UpdateReaction, UpdateComment, MessageReaction, MessageComment, NotificationPreferences } from '@/types';
+import { defaultAppearanceSettings, defaultNotificationPreferences } from '@/types';
 import { demoChats } from '@/lib/demo';
 import { generateMacroId, localId } from '@/lib/id';
 import { ensureAnonymousSession, getSupabaseAccessToken, isSupabaseConfigured, supabase } from '@/lib/supabase';
@@ -20,15 +21,30 @@ import {
 } from '@/lib/e2ee';
 import { encryptCallSignaling, decryptCallSignaling } from '@/lib/e2ee-calls';
 import { initializeE2EEProService, type E2EEProService } from '@/lib/e2ee-pro-service';
+import { triggerNotification, requestNotificationPermission, getCategoryFromMessage } from '@/lib/notifications';
 
 const PROFILE_KEY = 'macrochat.profile';
 const DEVICE_ID_KEY = 'macrochat.device_id';
+const APPEARANCE_KEY = 'macrochat.appearance';
+
+export type DeviceKind = 'mobile' | 'desktop' | 'web';
+export type ChatActivityState = 'typing' | 'recording' | 'screenshot';
+
+function detectDeviceKind(): DeviceKind {
+  if (Platform.OS === 'ios' || Platform.OS === 'android') return 'mobile';
+  if (Platform.OS !== 'web') return 'desktop';
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  if (/android|iphone|ipad|ipod|mobile/i.test(ua)) return 'mobile';
+  if (/macintosh|mac os x|windows|linux/i.test(ua)) return 'desktop';
+  return 'web';
+}
 
 type AppContextValue = {
   profile: Profile | null;
   loading: boolean;
   chats: Chat[];
-  activityByChat: Record<string, { state: 'typing' | 'recording'; userId: string }>;
+  activityByChat: Record<string, { state: ChatActivityState; userId: string }>;
+  presenceByUser: Record<string, { device: DeviceKind; onlineAt: string }>;
   backendMode: 'demo' | 'supabase';
   signalingReady: boolean;
   signalingEnabled: boolean;
@@ -37,10 +53,14 @@ type AppContextValue = {
   e2eeEnabled: boolean;
   e2eePro: E2EEProService | null;
   privacySettings: PrivacySettings;
+  appearanceSettings: AppearanceSettings;
   blockedContacts: BlockedContact[];
+  fakeDeviceStatus: 'mobile' | 'desktop' | 'web' | null;
+  notificationPrefs: NotificationPreferences;
   register: (displayName: string) => Promise<Profile>;
   restoreProfile: () => Promise<Profile | null>;
   updateProfilePicture: (avatarUrl: string | null) => Promise<void>;
+  updateProfileStatus: (status: ProfileStatus) => Promise<void>;
   setChatDisappearingTimer: (chatId: string, seconds: number | null) => void;
   signOut: () => Promise<void>;
   refreshSecurityState: () => Promise<void>;
@@ -48,6 +68,9 @@ type AppContextValue = {
   disableE2EE: () => Promise<void>;
   unlockE2EE: (passphrase: string) => Promise<boolean>;
   updatePrivacySetting: <Key extends keyof PrivacySettings>(key: Key, value: PrivacySettings[Key]) => Promise<void>;
+  updateAppearanceSettings: (next: Partial<AppearanceSettings> | ((current: AppearanceSettings) => AppearanceSettings)) => Promise<void>;
+  updateFakeDeviceStatus: (status: 'mobile' | 'desktop' | 'web' | null) => Promise<void>;
+  updateNotificationPrefs: (prefs: Partial<NotificationPreferences>) => Promise<void>;
   blockContact: (userId: string) => Promise<void>;
   unblockContact: (userId: string) => Promise<void>;
   sendMessage: (chatId: string, text: string, replyTo?: string, options?: { textColor?: string; fontStyle?: 'normal' | 'italic'; fontFamily?: string }) => void;
@@ -64,7 +87,7 @@ type AppContextValue = {
     durationMs?: number;
     replyTo?: string;
   }) => Promise<void>;
-  sendChatActivity: (chatId: string, state: 'typing' | 'recording' | null) => void;
+  sendChatActivity: (chatId: string, state: ChatActivityState | null) => void;
   addChat: (macroId: string) => Promise<string>;
   markRead: (chatId: string) => void;
   refreshChats: () => Promise<void>;
@@ -97,6 +120,9 @@ type AppContextValue = {
   postMessageComment: (messageId: string, text: string) => Promise<void>;
   removeMessageComment: (commentId: string) => Promise<void>;
   deleteMessage: (chatId: string, messageId: string) => void;
+  toggleMessagePin: (chatId: string, messageId: string) => void;
+  toggleMessageStar: (chatId: string, messageId: string) => void;
+  logChatSystemMessage: (chatId: string, text: string) => void;
 };
 
 type ActiveCallStatus = 'dialing' | 'ringing' | 'connected';
@@ -140,6 +166,9 @@ type MessageRow = {
   reply_to: string | null;
   created_at: string;
   expires_at: string | null;
+  text_color?: string | null;
+  font_style?: string | null;
+  font_family?: string | null;
 };
 
 type DbErrorLike = {
@@ -147,6 +176,21 @@ type DbErrorLike = {
   code?: string;
   details?: string;
   hint?: string;
+};
+
+const getMessageReactionKey = (messageId: string, userId: string, emoji: string) => `${messageId}::${userId}::${emoji}`;
+
+const parseMessageReactionKey = (reactionId: string) => {
+  const parts = reactionId.split('::');
+  if (parts.length >= 3) {
+    const [messageId, userId, ...emojiParts] = parts;
+    return {
+      messageId,
+      userId,
+      emoji: emojiParts.join('::'),
+    };
+  }
+  return null;
 };
 
 function toReadableDbError(step: string, error: DbErrorLike | null | undefined) {
@@ -161,11 +205,58 @@ function toReadableDbError(step: string, error: DbErrorLike | null | undefined) 
     return new Error(`${step}: Network request failed. Check internet access on both devices and verify EXPO_PUBLIC_SUPABASE_URL is reachable.`);
   }
 
+  if (error?.code === '42501' || lowered.includes('row-level security') || lowered.includes('permission denied')) {
+    return new Error(`${step}: The database rejected this action for your account. Run supabase/fix-aal2-conversation-403.sql, then sign out and back in.`);
+  }
+
   const parts = [message || 'Unknown database error'];
   if (error?.code) parts.push(`code=${error.code}`);
   if (error?.details) parts.push(error.details);
   if (error?.hint) parts.push(`hint=${error.hint}`);
   return new Error(`${step}: ${parts.join(' | ')}`);
+}
+
+type AccessTokenClaims = {
+  sub?: string;
+  role?: string;
+  aal?: string;
+  exp?: number;
+  is_anonymous?: boolean;
+};
+
+// Decodes the JWT payload locally so RLS rejections can be traced to the actual claims sent.
+async function readAccessTokenClaims(supabaseClient: NonNullable<typeof supabase>): Promise<AccessTokenClaims | null> {
+  const { data } = await supabaseClient.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) return null;
+  try {
+    const payload = token.split('.')[1];
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=')));
+  } catch {
+    return null;
+  }
+}
+
+async function getAuthenticatedUserId(supabaseClient: NonNullable<typeof supabase>) {
+  const { data: sessionData, error: sessionError } = await supabaseClient.auth.getSession();
+  if (sessionError) throw toReadableDbError('Checking current session failed', sessionError);
+
+  let user = sessionData.session?.user ?? null;
+  if (!user) {
+    const { data: refreshData, error: refreshError } = await supabaseClient.auth.refreshSession();
+    if (refreshError) throw toReadableDbError('Refreshing session failed', refreshError);
+    user = refreshData.session?.user ?? null;
+  }
+
+  if (!user) {
+    const { data: userData, error: userError } = await supabaseClient.auth.getUser();
+    if (userError) throw toReadableDbError('Resolving active account failed', userError);
+    user = userData.user ?? null;
+  }
+
+  if (!user) throw new Error('Your session is no longer valid. Please sign in again.');
+  return user.id;
 }
 
 function parseMediaBody(body: string | null | undefined): {
@@ -308,6 +399,33 @@ async function clearProfileFromStorage() {
   await SecureStore.deleteItemAsync(PROFILE_KEY);
 }
 
+async function readAppearanceSettingsFromStorage(): Promise<AppearanceSettings> {
+  const fallback = defaultAppearanceSettings;
+  try {
+    const saved = Platform.OS === 'web'
+      ? (typeof localStorage !== 'undefined' ? localStorage.getItem(APPEARANCE_KEY) : null)
+      : await SecureStore.getItemAsync(APPEARANCE_KEY);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved) as Partial<AppearanceSettings>;
+    return {
+      textSize: parsed.textSize === 'compact' || parsed.textSize === 'comfortable' || parsed.textSize === 'large' || parsed.textSize === 'xl' ? parsed.textSize : fallback.textSize,
+      wallpaper: parsed.wallpaper === 'midnight' || parsed.wallpaper === 'obsidian' || parsed.wallpaper === 'aurora' || parsed.wallpaper === 'graphite' ? parsed.wallpaper : fallback.wallpaper,
+      fontFamily: parsed.fontFamily === 'system' || parsed.fontFamily === 'figtree' || parsed.fontFamily === 'space-grotesk' || parsed.fontFamily === 'instrument-serif' || parsed.fontFamily === 'oswald' || parsed.fontFamily === 'dancing-script' ? parsed.fontFamily : fallback.fontFamily,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeAppearanceSettingsToStorage(settings: AppearanceSettings) {
+  const serialized = JSON.stringify(settings);
+  if (Platform.OS === 'web') {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(APPEARANCE_KEY, serialized);
+    return;
+  }
+  await SecureStore.setItemAsync(APPEARANCE_KEY, serialized);
+}
+
 // Device ID management for E2EE Pro
 async function getOrCreateDeviceId(): Promise<string> {
   if (Platform.OS === 'web') {
@@ -317,18 +435,29 @@ async function getOrCreateDeviceId(): Promise<string> {
     if (typeof localStorage !== 'undefined') localStorage.setItem(DEVICE_ID_KEY, deviceId);
     return deviceId;
   }
-  const stored = await SecureStore.getItemAsync(DEVICE_ID_KEY);
-  if (stored) return stored;
-  const deviceId = localId('device');
-  await SecureStore.setItemAsync(DEVICE_ID_KEY, deviceId);
-  return deviceId;
+  try {
+    const stored = await SecureStore.getItemAsync(DEVICE_ID_KEY);
+    if (stored) return stored;
+    const deviceId = localId('device');
+    await SecureStore.setItemAsync(DEVICE_ID_KEY, deviceId);
+    return deviceId;
+  } catch (e) {
+    // SecureStore failed (mobile web), fallback to localStorage
+    console.warn('SecureStore unavailable, using localStorage fallback', e);
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(DEVICE_ID_KEY) : null;
+    if (stored) return stored;
+    const deviceId = localId('device');
+    if (typeof localStorage !== 'undefined') localStorage.setItem(DEVICE_ID_KEY, deviceId);
+    return deviceId;
+  }
 }
 
 export function AppProvider({ children }: PropsWithChildren) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [chats, setChats] = useState<Chat[]>([]);
-  const [activityByChat, setActivityByChat] = useState<Record<string, { state: 'typing' | 'recording'; userId: string }>>({});
+  const [activityByChat, setActivityByChat] = useState<Record<string, { state: ChatActivityState; userId: string }>>({});
+  const [presenceByUser, setPresenceByUser] = useState<Record<string, { device: DeviceKind; onlineAt: string }>>({});
   const [signalingReady, setSignalingReady] = useState(false);
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [localCallStream, setLocalCallStream] = useState<MediaStream | null>(null);
@@ -348,9 +477,13 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [mfaAal2, setMfaAal2] = useState(false);
   const [e2eePro, setE2eePro] = useState<E2EEProService | null>(null);
   const deviceIdRef = useRef<string | null>(null);
+  const e2eeProUserIdRef = useRef<string | null>(null);
   const [e2eePassphrase, setE2eePassphrase] = useState<string | null>(null);
   const [privacySettings, setPrivacySettings] = useState(defaultPrivacySettings);
+  const [appearanceSettings, setAppearanceSettings] = useState<AppearanceSettings>(defaultAppearanceSettings);
   const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
+  const [fakeDeviceStatus, setFakeDeviceStatus] = useState<'mobile' | 'desktop' | 'web' | null>(null);
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPreferences>(defaultNotificationPreferences);
 
   const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
   const [mutedChatIds, setMutedChatIds] = useState<Set<string>>(new Set());
@@ -366,6 +499,17 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => { mutedChatIdsRef.current = mutedChatIds; }, [mutedChatIds]);
   useEffect(() => { clearedChatIdsRef.current = clearedChatIds; }, [clearedChatIds]);
   useEffect(() => { deletedChatIdsRef.current = deletedChatIds; }, [deletedChatIds]);
+  
+  // Periodically remove expired messages
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setChats((current) => current.map((chat) => ({
+        ...chat,
+        messages: chat.messages.filter((msg) => !msg.expiresAt || new Date(msg.expiresAt).getTime() > Date.now()),
+      })));
+    }, 1000); // Check every second
+    return () => clearInterval(interval);
+  }, []);
   const syncChannelRef = useRef<ReturnType<NonNullable<typeof supabase>['channel']> | null>(null);
   const signalingUrl = process.env.EXPO_PUBLIC_SIGNALING_URL;
   const signalingEnabled = Boolean(signalingUrl);
@@ -390,6 +534,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       displayName: data.display_name,
       avatarColor: data.avatar_color,
       avatarUrl: (data as { avatar_url?: string | null }).avatar_url ?? undefined,
+      status: (data as { status?: ProfileStatus } | null)?.status ?? 'online',
     };
     await writeProfileToStorage(restored);
     setProfile(restored);
@@ -421,16 +566,18 @@ export function AppProvider({ children }: PropsWithChildren) {
     // Initialize E2EE Pro service
     try {
       const userId = sessionData.session?.user.id;
-      if (userId && !deviceIdRef.current) {
-        const deviceId = await getOrCreateDeviceId();
+      // Re-runs when the signed-in user changes, otherwise a second account in the
+      // same session never publishes its X3DH key bundle.
+      if (userId && e2eeProUserIdRef.current !== userId) {
+        const deviceId = deviceIdRef.current ?? await getOrCreateDeviceId();
         deviceIdRef.current = deviceId;
         const service = initializeE2EEProService(userId, deviceId);
         await service.initialize();
+        e2eeProUserIdRef.current = userId;
         setE2eePro(service);
-        console.log('[E2EE Pro] Service initialized for user:', userId, 'device:', deviceId);
       }
     } catch (error) {
-      console.error('[E2EE Pro] Initialization failed:', error);
+      // Silently fail in production
     }
   }, []);
 
@@ -445,7 +592,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     const [privacyResult, blockedResult] = await Promise.all([
       supabase
         .from('macrochat_user_privacy')
-        .select('read_receipts,share_typing_activity,allow_incoming_calls,default_message_ttl_seconds')
+        .select('read_receipts,share_typing_activity,allow_incoming_calls,show_device_status,default_message_ttl_seconds')
         .eq('user_id', profile.id)
         .maybeSingle(),
       supabase.rpc('macrochat_list_blocked_users'),
@@ -456,6 +603,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         readReceipts: privacyResult.data.read_receipts,
         shareTypingActivity: privacyResult.data.share_typing_activity,
         allowIncomingCalls: privacyResult.data.allow_incoming_calls,
+        showDeviceStatus: privacyResult.data.show_device_status ?? true,
         defaultMessageTtlSeconds: privacyResult.data.default_message_ttl_seconds,
       };
       setPrivacySettings(synced);
@@ -472,6 +620,41 @@ export function AppProvider({ children }: PropsWithChildren) {
         avatarColor: contact.avatar_color,
       })));
     }
+  }, [profile]);
+
+  const refreshMessageReactions = useCallback(async () => {
+    if (!supabase || !profile) {
+      setMessageReactions({});
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('macrochat_message_reactions')
+      .select('message_id,user_id,emoji,created_at,macrochat_profiles(display_name)')
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.warn('Failed to load message reactions', error.message);
+      return;
+    }
+
+    const grouped: Record<string, MessageReaction[]> = {};
+    for (const row of data ?? []) {
+      const messageId = row.message_id as string;
+      const profileData = row.macrochat_profiles as { display_name?: string } | null;
+      const reactionKey = getMessageReactionKey(messageId, row.user_id as string, row.emoji as string);
+      const reaction: MessageReaction = {
+        id: reactionKey,
+        messageId,
+        userId: row.user_id,
+        userDisplayName: profileData?.display_name ?? (row.user_id === profile.id ? profile.displayName : 'Contact'),
+        emoji: row.emoji,
+        createdAt: row.created_at,
+      };
+      grouped[messageId] = [...(grouped[messageId] ?? []), reaction];
+    }
+
+    setMessageReactions(grouped);
   }, [profile]);
 
   const refreshCallHistory = useCallback(async () => {
@@ -530,8 +713,6 @@ export function AppProvider({ children }: PropsWithChildren) {
       expires_at: string;
     }[];
 
-    console.log('[refreshUpdates] Raw rows from DB:', rows.length, rows.slice(0, 1).map(r => ({ id: r.id, kind: r.kind, hasMediaData: !!r.media_data, mediaDataLength: r.media_data?.length })));
-
     // Fetch profile info for each update user
     const userIds = [...new Set(rows.map((row) => row.user_id))];
     let profilesByUserId = new Map<string, { display_name: string; avatar_color: string }>();
@@ -572,29 +753,22 @@ export function AppProvider({ children }: PropsWithChildren) {
         mine: row.user_id === profile.id,
       };
     }));
-
-    console.log('[refreshUpdates] Final updates:', { total: rows.length, byType: rows.reduce((acc, r) => ({...acc, [r.kind]: (acc[r.kind] || 0) + 1}), {} as Record<string, number>), withMediaUrl: rows.filter(r => r.media_data && (r.media_data.startsWith('data:') || r.media_data.startsWith('blob:'))).length });
   }, [profile]);
 
   const postUpdate = useCallback(async (input: { kind: 'photo' | 'video' | 'text'; uri?: string; caption?: string }) => {
-    console.log('[postUpdate] Starting with input:', input);
     if (!supabase || !profile) throw new Error('Posting an update requires an online account.');
 
     let mediaData: string | null = null;
     if (input.uri) {
-      console.log('[postUpdate] Reading media from URI:', input.uri);
       const blob = await readUriAsUploadBody(input.uri);
       
       if (blob instanceof Blob) {
-        console.log('[postUpdate] Converting blob to base64');
         mediaData = await blobToBase64(blob);
-        console.log('[postUpdate] Base64 data length:', mediaData.length);
       } else {
         throw new Error('Unsupported platform for media upload');
       }
     }
 
-    console.log('[postUpdate] Inserting update to database with media_data');
     const { error } = await supabase.from('macrochat_updates').insert({
       user_id: profile.id,
       kind: input.kind,
@@ -602,13 +776,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       caption: input.caption,
     });
     if (error) {
-      console.error('[postUpdate] Insert error:', error);
       throw toReadableDbError('Posting update failed', error);
     }
-    console.log('[postUpdate] Insert successful, refreshing updates');
 
     await refreshUpdates();
-    console.log('[postUpdate] Complete');
   }, [profile, refreshUpdates]);
 
   const markUpdateViewed = useCallback(async (updateId: string) => {
@@ -628,10 +799,8 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (!supabase || !profile) return;
     const { error } = await supabase.from('macrochat_updates').delete().eq('id', updateId).eq('user_id', profile.id);
     if (error) {
-      console.error('[deleteUpdate] Error:', error.message);
       throw toReadableDbError('Failed to delete update', error);
     }
-    console.log('[deleteUpdate] Success, removing from state');
     setUpdates((current) => current.filter((item) => item.id !== updateId));
   }, [profile]);
 
@@ -709,7 +878,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const postMessageReaction = useCallback(async (messageId: string, emoji: string) => {
     if (!profile) return;
-    
+
     // Validate that messageId is a real UUID (not a local optimistic ID)
     const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId);
     if (!isValidUuid) {
@@ -717,8 +886,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;  // Silently return instead of throwing
     }
 
+    const reactionKey = getMessageReactionKey(messageId, profile.id, emoji);
     const optimisticReaction = {
-      id: `local-${messageId}-${emoji}-${Date.now()}`,
+      id: reactionKey,
       messageId,
       userId: profile.id,
       userDisplayName: profile.displayName,
@@ -737,14 +907,15 @@ export function AppProvider({ children }: PropsWithChildren) {
       message_id: messageId,
       user_id: profile.id,
       emoji,
-    }, { onConflict: 'message_id,user_id' }).select() as { data: any[] | null; error: any };
+    }, { onConflict: 'message_id,user_id' }).select('message_id,user_id,emoji,created_at') as { data: any[] | null; error: any };
     if (error) throw error;
     const reaction = data?.[0];
     if (reaction) {
+      const finalKey = getMessageReactionKey(reaction.message_id, reaction.user_id, reaction.emoji);
       setMessageReactions((current) => ({
         ...current,
         [messageId]: [...(current[messageId] ?? []).filter((r) => r.emoji !== emoji), {
-          id: reaction.id,
+          id: finalKey,
           messageId,
           userId: profile.id,
           userDisplayName: profile.displayName,
@@ -756,6 +927,8 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [profile]);
 
   const removeMessageReaction = useCallback(async (reactionId: string) => {
+    const parsed = parseMessageReactionKey(reactionId);
+
     if (!supabase) {
       setMessageReactions((current) => {
         const next = { ...current };
@@ -766,7 +939,18 @@ export function AppProvider({ children }: PropsWithChildren) {
       });
       return;
     }
-    await supabase.from('macrochat_message_reactions').delete().eq('id', reactionId);
+
+    if (parsed) {
+      await supabase
+        .from('macrochat_message_reactions')
+        .delete()
+        .eq('message_id', parsed.messageId)
+        .eq('user_id', parsed.userId)
+        .eq('emoji', parsed.emoji);
+    } else {
+      await supabase.from('macrochat_message_reactions').delete().eq('id', reactionId);
+    }
+
     setMessageReactions((current) => {
       const next = { ...current };
       for (const messageId in next) {
@@ -828,8 +1012,15 @@ export function AppProvider({ children }: PropsWithChildren) {
   const loadChatsFromBackend = useCallback(async () => {
     if (!supabase || !profile) return;
 
-    const { data: sessionData } = await supabase.auth.getSession();
-    const actorUserId = sessionData.session?.user.id ?? profile.id;
+    if (e2eePro) {
+      try {
+        await e2eePro.loadActiveSessions();
+      } catch (e) {
+        console.warn('Failed to refresh E2EE sessions:', e);
+      }
+    }
+
+    const actorUserId = await getAuthenticatedUserId(supabase);
 
     const memberRes = await supabase
       .from('macrochat_conversation_members')
@@ -859,7 +1050,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         .in('conversation_id', conversationIds),
       supabase
         .from('macrochat_messages')
-        .select('id,client_id,conversation_id,sender_id,body,kind,media_path,body_ciphertext,body_nonce,encryption_version,reply_to,created_at,expires_at')
+        .select('id,client_id,conversation_id,sender_id,body,kind,media_path,body_ciphertext,body_nonce,encryption_version,reply_to,created_at,expires_at,text_color,font_style,font_family')
         .in('conversation_id', conversationIds)
         .order('created_at', { ascending: true }),
     ]);
@@ -896,6 +1087,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         ? []
         : messages
             .filter((row) => row.conversation_id === conversation.id)
+            .filter((row) => !row.expires_at || new Date(row.expires_at).getTime() > Date.now())
             .map((row) => {
           const mediaMeta = parseMediaBody(row.body);
           const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
@@ -924,6 +1116,13 @@ export function AppProvider({ children }: PropsWithChildren) {
             displayText = mediaMeta.name || mediaMeta.text || row.body || row.kind;
           }
 
+          const fontStyle: 'normal' | 'italic' | undefined =
+            row.font_style === 'italic' || row.font_style === 'normal'
+              ? row.font_style
+              : mediaMeta.fontStyle === 'italic' || mediaMeta.fontStyle === 'normal'
+                ? mediaMeta.fontStyle
+                : undefined;
+
           return {
             id: row.id,
             clientId: row.client_id ?? undefined,
@@ -936,9 +1135,9 @@ export function AppProvider({ children }: PropsWithChildren) {
             fileName: mediaMeta.name,
             mimeType: mediaMeta.mimeType,
             durationMs: mediaMeta.durationMs,
-            textColor: mediaMeta.textColor,
-            fontStyle: mediaMeta.fontStyle,
-            fontFamily: mediaMeta.fontFamily,
+            textColor: row.text_color || mediaMeta.textColor,
+            fontStyle,
+            fontFamily: row.font_family || mediaMeta.fontFamily,
             callInfo: mediaMeta.callInfo,
             encrypted,
             encryptionVersion: row.encryption_version ?? undefined,
@@ -957,9 +1156,22 @@ export function AppProvider({ children }: PropsWithChildren) {
         return new Date(message.createdAt).getTime() > new Date(myLastReadAt).getTime();
       }).length;
 
-      const lastSeen = other?.macrochat_profiles?.last_seen
-        ? `last seen ${new Date(other.macrochat_profiles.last_seen).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
-        : conversation.is_group ? 'group conversation' : 'private contact';
+      const getLastSeenText = () => {
+        if (!other?.macrochat_profiles?.last_seen) return conversation.is_group ? 'group conversation' : 'private contact';
+        const lastSeenDate = new Date(other.macrochat_profiles.last_seen);
+        const now = new Date();
+        const diffMs = now.getTime() - lastSeenDate.getTime();
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+        const diffDays = Math.floor(diffMs / 86400000);
+        if (diffMins < 1) return 'last seen just now';
+        if (diffMins < 60) return `last seen ${diffMins}m ago`;
+        if (diffHours < 24) return `last seen ${diffHours}h ago`;
+        if (diffDays === 1) return 'last seen yesterday';
+        if (diffDays < 7) return `last seen ${diffDays}d ago`;
+        return `last seen ${lastSeenDate.toLocaleDateString()}`;
+      };
+      const lastSeen = getLastSeenText();
 
       return {
         id: conversation.id,
@@ -984,10 +1196,27 @@ export function AppProvider({ children }: PropsWithChildren) {
     }).filter((chat) => !deletedChatIdsRef.current.has(chat.id) && (!chat.participantUserId || !blockedContacts.some((contact) => contact.id === chat.participantUserId)));
 
     builtChats.sort((a, b) => {
-      const aLast = a.messages[a.messages.length - 1]?.createdAt ?? '';
-      const bLast = b.messages[b.messages.length - 1]?.createdAt ?? '';
-      return new Date(bLast).getTime() - new Date(aLast).getTime();
+      const aMessages = a.messages && a.messages.length > 0 ? a.messages : [];
+      const bMessages = b.messages && b.messages.length > 0 ? b.messages : [];
+      const aLast = aMessages.length > 0 ? aMessages[aMessages.length - 1]?.createdAt : '';
+      const bLast = bMessages.length > 0 ? bMessages[bMessages.length - 1]?.createdAt : '';
+      const aTime = aLast ? new Date(aLast).getTime() : 0;
+      const bTime = bLast ? new Date(bLast).getTime() : 0;
+      return bTime - aTime;
     });
+
+    // Update user's last_seen timestamp
+    void (async () => {
+      try {
+        if (!supabase) return;
+        await supabase
+          .from('macrochat_profiles')
+          .update({ last_seen: new Date().toISOString() })
+          .eq('id', actorUserId);
+      } catch (error) {
+        console.warn('Failed to update last_seen:', error);
+      }
+    })();
 
     setChats((current) => {
       const pendingByConversation = new Map<string, Message[]>();
@@ -1000,8 +1229,12 @@ export function AppProvider({ children }: PropsWithChildren) {
         const pending = pendingByConversation.get(chat.id);
         if (!pending || pending.length === 0) return chat;
 
-        const existingIds = new Set(chat.messages.map((message) => message.id));
-        const carryForward = pending.filter((message) => !existingIds.has(message.id));
+        const existingKeys = new Set(
+          chat.messages.flatMap((m) => [m.id, m.clientId].filter((k): k is string => Boolean(k)))
+        );
+        const carryForward = pending.filter(
+          (m) => !existingKeys.has(m.id) && (!m.clientId || !existingKeys.has(m.clientId))
+        );
         if (carryForward.length === 0) return chat;
 
         const mergedMessages = [...chat.messages, ...carryForward]
@@ -1010,7 +1243,8 @@ export function AppProvider({ children }: PropsWithChildren) {
         return { ...chat, messages: mergedMessages };
       });
     });
-  }, [blockedContacts, e2eePassphrase, profile]);
+    void refreshMessageReactions();
+  }, [blockedContacts, e2eePassphrase, e2eePro, profile, refreshMessageReactions]);
 
   const mergeRealtimeMessage = useCallback((row: MessageRow) => {
     if (!profile) return;
@@ -1029,6 +1263,25 @@ export function AppProvider({ children }: PropsWithChildren) {
           const peerUserId = row.sender_id === profile.id ? chat?.participantUserId : row.sender_id;
           if (peerUserId) {
             decryptedText = e2eePro.decryptCiphertextSync(row.body_ciphertext, row.body_nonce, peerUserId);
+            if (!decryptedText) {
+              const cipher = row.body_ciphertext;
+              const nonce = row.body_nonce;
+              const conversationId = row.conversation_id;
+              const rowId = row.id;
+              const rowClientId = row.client_id;
+              void e2eePro.loadActiveSessions().then(() => {
+                const retryText = e2eePro.decryptCiphertextSync(cipher, nonce, peerUserId);
+                if (retryText) {
+                  setChats((current) => current.map((c) => {
+                    if (c.id !== conversationId) return c;
+                    return {
+                      ...c,
+                      messages: c.messages.map((m) => (m.id === rowId || (rowClientId && m.clientId === rowClientId)) ? { ...m, text: retryText } : m)
+                    };
+                  }));
+                }
+              });
+            }
           }
         }
       }
@@ -1070,6 +1323,24 @@ export function AppProvider({ children }: PropsWithChildren) {
       replyTo: row.reply_to ?? undefined,
     };
 
+    // Trigger notification for incoming messages
+    if (incoming.senderId !== 'me') {
+      const chat = chats.find((c) => c.id === row.conversation_id);
+      if (chat) {
+        const senderName = chat.name || 'MacroChat';
+        void triggerNotification(
+          getCategoryFromMessage({ isGroup: chat.isGroup }),
+          notificationPrefs,
+          {
+            title: senderName,
+            senderName,
+            messagePreview: incoming.text,
+            icon: chat.avatarUrl,
+          }
+        );
+      }
+    }
+
     setChats((current) => current.map((chat) => {
       if (chat.id !== row.conversation_id) return chat;
       // Match an existing message by immutable clientId first, then by real id, to avoid duplicates
@@ -1092,60 +1363,124 @@ export function AppProvider({ children }: PropsWithChildren) {
         messages: [...chat.messages, incoming],
       };
     }));
-  }, [e2eePro, e2eePassphrase, profile]);
+  }, [e2eePro, e2eePassphrase, profile, chats, notificationPrefs]);
 
   useEffect(() => {
     readProfileFromStorage()
       .then(async (saved) => {
         if (saved) {
           setProfile(JSON.parse(saved) as Profile);
-          return;
+        } else {
+          await restoreProfile();
         }
-        await restoreProfile();
       })
       .catch(() => undefined)
       .finally(() => setLoading(false));
+
+    readAppearanceSettingsFromStorage()
+      .then((saved) => setAppearanceSettings(saved))
+      .catch(() => undefined);
+
+    // Load fake device status
+    if (Platform.OS === 'web') {
+      const saved = localStorage.getItem('macrochat.fakeDeviceStatus');
+      if (saved) setFakeDeviceStatus(saved as any);
+    } else {
+      SecureStore.getItemAsync('macrochat.fakeDeviceStatus')
+        .then((saved) => {
+          if (saved) setFakeDeviceStatus(saved as any);
+        })
+        .catch(() => undefined);
+    }
+
+    // Load notification preferences
+    if (Platform.OS === 'web') {
+      const saved = localStorage.getItem('macrochat.notificationPrefs');
+      if (saved) {
+        try {
+          setNotificationPrefs(JSON.parse(saved));
+        } catch {
+          // Use defaults if parsing fails
+        }
+      }
+    } else {
+      SecureStore.getItemAsync('macrochat.notificationPrefs')
+        .then((saved) => {
+          if (saved) {
+            try {
+              setNotificationPrefs(JSON.parse(saved));
+            } catch {
+              // Use defaults if parsing fails
+            }
+          }
+        })
+        .catch(() => undefined);
+    }
   }, [restoreProfile]);
 
   useEffect(() => {
     refreshSecurityState().catch(() => undefined);
-  }, [refreshSecurityState]);
+  }, [refreshSecurityState, profile?.id]);
 
   useEffect(() => {
     refreshPrivacyState().catch((error) => console.warn('Failed to refresh privacy settings', error));
   }, [refreshPrivacyState]);
 
+  // Request notification permission on app start
+  useEffect(() => {
+    void requestNotificationPermission();
+  }, []);
+
   useEffect(() => {
     if (!supabase) {
       setChats(demoChats);
       setActivityByChat({});
+      setPresenceByUser({});
       return;
     }
 
     if (!profile) {
       setChats([]);
       setActivityByChat({});
+      setPresenceByUser({});
       return;
     }
 
     loadChatsFromBackend().catch(() => undefined);
+    refreshMessageReactions().catch(() => undefined);
 
-    const channel = supabase.channel(`macrochat-sync-${profile.id}`)
+    const channel = supabase.channel(`macrochat-sync-${profile.id}`, {
+      config: { presence: { key: profile.id } },
+    })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'macrochat_messages' }, (change) => {
-        mergeRealtimeMessage(change.new as MessageRow);
-        if ((change.new as MessageRow).kind !== 'text') loadChatsFromBackend().catch(() => undefined);
+        const nextRow = change.new as MessageRow;
+        mergeRealtimeMessage(nextRow);
+        if (nextRow.kind !== 'text') loadChatsFromBackend().catch(() => undefined);
       })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'macrochat_messages' }, () => {
-        loadChatsFromBackend().catch(() => undefined);
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'macrochat_messages' }, (change) => {
+        const nextRow = change.new as MessageRow;
+        if (!nextRow) return;
+        mergeRealtimeMessage(nextRow);
       })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'macrochat_messages' }, () => {
-        loadChatsFromBackend().catch(() => undefined);
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'macrochat_messages' }, (change) => {
+        const deleted = change.old as MessageRow;
+        if (!deleted) return;
+        setChats((current) => current.map((chat) => {
+          if (chat.id !== deleted.conversation_id) return chat;
+          return {
+            ...chat,
+            messages: chat.messages.filter((message) => message.id !== deleted.id && (!deleted.client_id || message.clientId !== deleted.client_id)),
+          };
+        }));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'macrochat_message_reactions' }, () => {
+        refreshMessageReactions().catch(() => undefined);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'macrochat_conversation_members' }, () => {
         loadChatsFromBackend().catch(() => undefined);
       })
       .on('broadcast', { event: 'chat-activity' }, ({ payload }) => {
-        const next = payload as { chatId?: string; userId?: string; state?: 'typing' | 'recording' | null };
+        const next = payload as { chatId?: string; userId?: string; state?: ChatActivityState | null };
         if (!next?.chatId || !next?.userId || next.userId === profile.id) return;
 
         if (!next.state) {
@@ -1156,6 +1491,12 @@ export function AppProvider({ children }: PropsWithChildren) {
             return updated;
           });
           return;
+        }
+
+        if (next.state === 'screenshot') {
+          logChatSystemMessage(next.chatId, 'Screenshot taken');
+        } else if (next.state === 'recording') {
+          logChatSystemMessage(next.chatId, 'Recording started');
         }
 
         const activityChatId = next.chatId;
@@ -1181,11 +1522,26 @@ export function AppProvider({ children }: PropsWithChildren) {
           });
         }, 2500);
       })
-      .subscribe();
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState() as Record<string, { device?: DeviceKind; onlineAt?: string }[]>;
+        const next: Record<string, { device: DeviceKind; onlineAt: string }> = {};
+        Object.entries(state).forEach(([userId, entries]) => {
+          const entry = entries?.[entries.length - 1];
+          next[userId] = {
+            device: entry?.device ?? 'web',
+            onlineAt: entry?.onlineAt ?? new Date().toISOString(),
+          };
+        });
+        setPresenceByUser(next);
+      })
+      .subscribe((status) => {
+        if (status !== 'SUBSCRIBED') return;
+        void channel.track({ device: detectDeviceKind(), onlineAt: new Date().toISOString() });
+      });
 
     const refreshTimer = setInterval(() => {
       loadChatsFromBackend().catch(() => undefined);
-    }, 5000);
+    }, 30000);
     const appStateSubscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') loadChatsFromBackend().catch(() => undefined);
     });
@@ -1198,9 +1554,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       syncChannelRef.current = null;
       supabase?.removeChannel(channel);
     };
-  }, [loadChatsFromBackend, mergeRealtimeMessage, profile]);
+  }, [loadChatsFromBackend, mergeRealtimeMessage, profile, refreshMessageReactions]);
 
-  const sendChatActivity = useCallback((chatId: string, state: 'typing' | 'recording' | null) => {
+  const sendChatActivity = useCallback((chatId: string, state: ChatActivityState | null) => {
     if (state && !privacySettings.shareTypingActivity) return;
     if (!chatId || !profile || !syncChannelRef.current) return;
     syncChannelRef.current.send({
@@ -1213,6 +1569,25 @@ export function AppProvider({ children }: PropsWithChildren) {
       },
     }).catch(() => undefined);
   }, [privacySettings.shareTypingActivity, profile]);
+
+  const logChatSystemMessage = useCallback((chatId: string, text: string) => {
+    if (!chatId || !text.trim()) return;
+    const messageId = `system-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const activityMessage: Message = {
+      id: messageId,
+      clientId: messageId,
+      chatId,
+      senderId: 'system',
+      text: text.trim(),
+      kind: 'system',
+      createdAt: new Date().toISOString(),
+      status: 'read',
+    };
+
+    setChats((current) => current.map((chat) => chat.id === chatId
+      ? { ...chat, messages: [...chat.messages, activityMessage] }
+      : chat));
+  }, []);
 
   const teardownCall = useCallback((outcome?: CallOutcome) => {
     const call = activeCallRef.current;
@@ -1290,14 +1665,11 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (pc.connectionState === 'connected') {
         setMediaConnected(true);
         setCallStartedAt((current) => current ?? Date.now());
-        console.log('[WebRTC] Connection established');
       } else if (pc.connectionState === 'disconnected') {
-        console.warn('[WebRTC] Connection disconnected, attempting ICE restart...');
         setMediaConnected(false);
         // Trigger ICE restart to recover from temporary disconnects
         pc.restartIce();
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        console.error('[WebRTC] Connection failed or closed');
         setMediaConnected(false);
         teardownCall();
       }
@@ -1359,6 +1731,19 @@ export function AppProvider({ children }: PropsWithChildren) {
             video: Boolean(payload.video),
             status: 'ringing',
           });
+          // Trigger call notification
+          const chat = chats.find((c) => c.id === payload.conversationId);
+          const callerName = chat?.name || 'Someone';
+          void triggerNotification(
+            'calls',
+            notificationPrefs,
+            {
+              title: `${callerName} is calling...`,
+              body: payload.video ? 'Video call' : 'Audio call',
+              senderName: callerName,
+              icon: chat?.avatarUrl,
+            }
+          );
         },
         onAccepted: (payload) => {
           if (!payload?.callId) return;
@@ -1491,6 +1876,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       read_receipts: next.readReceipts,
       share_typing_activity: next.shareTypingActivity,
       allow_incoming_calls: next.allowIncomingCalls,
+      show_device_status: next.showDeviceStatus,
       default_message_ttl_seconds: next.defaultMessageTtlSeconds,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id' });
@@ -1501,6 +1887,68 @@ export function AppProvider({ children }: PropsWithChildren) {
       await loadChatsFromBackend();
     }
   }, [loadChatsFromBackend, privacySettings, profile]);
+
+  const updateAppearanceSettings = useCallback(async (nextOrUpdater: Partial<AppearanceSettings> | ((current: AppearanceSettings) => AppearanceSettings)) => {
+    setAppearanceSettings((current) => {
+      const resolved = typeof nextOrUpdater === 'function' ? nextOrUpdater(current) : { ...current, ...nextOrUpdater };
+      void writeAppearanceSettingsToStorage(resolved);
+      return resolved;
+    });
+  }, []);
+
+  const updateFakeDeviceStatus = useCallback(async (status: 'mobile' | 'desktop' | 'web' | null) => {
+    setFakeDeviceStatus(status);
+    if (Platform.OS === 'web') {
+      localStorage.setItem('macrochat.fakeDeviceStatus', status || '');
+    } else {
+      if (status) {
+        await SecureStore.setItemAsync('macrochat.fakeDeviceStatus', status);
+      } else {
+        await SecureStore.deleteItemAsync('macrochat.fakeDeviceStatus');
+      }
+    }
+    // Save to Supabase if available
+    if (supabase && profile) {
+      try {
+        await supabase.from('profiles').update({ fake_device_status: status }).eq('id', profile.id);
+      } catch {
+        // Silently fail if Supabase save fails
+      }
+    }
+  }, [profile]);
+
+  const updateNotificationPrefs = useCallback(async (nextPrefs: Partial<NotificationPreferences>) => {
+    setNotificationPrefs((current) => {
+      const updated = { ...current, ...nextPrefs };
+      if (Platform.OS === 'web') {
+        localStorage.setItem('macrochat.notificationPrefs', JSON.stringify(updated));
+      } else {
+        void SecureStore.setItemAsync('macrochat.notificationPrefs', JSON.stringify(updated));
+      }
+      // Save to Supabase if available
+      if (supabase && profile) {
+        const dataToSave = {
+          user_id: profile.id,
+          messages: updated.messages,
+          groups: updated.groups,
+          calls: updated.calls,
+          status: updated.status,
+          updates: updated.updates,
+          sound: updated.sound,
+          vibration: updated.vibration,
+          preview: updated.preview,
+          badge: updated.badge,
+          background_sync: updated.backgroundSync,
+        };
+        try {
+          supabase.from('notification_preferences').upsert(dataToSave).then(() => undefined);
+        } catch {
+          // Silently fail if Supabase save fails
+        }
+      }
+      return updated;
+    });
+  }, [profile]);
 
   const blockContact = useCallback(async (userId: string) => {
     setChats((current) => current.filter((chat) => chat.participantUserId !== userId));
@@ -1554,6 +2002,13 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [profile, loadChatsFromBackend]);
 
+  const updateProfileStatus = useCallback(async (status: ProfileStatus) => {
+    if (!profile) return;
+    const nextProfile: Profile = { ...profile, status };
+    setProfile(nextProfile);
+    await writeProfileToStorage(nextProfile);
+  }, [profile]);
+
   const register = useCallback(async (displayName: string) => {
     const session = await ensureAnonymousSession();
     const next: Profile = {
@@ -1562,6 +2017,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       displayName: displayName.trim(),
       avatarColor: '#55B9FF',
       avatarUrl: DEFAULT_PROFILE_AVATARS[Math.floor(Math.random() * DEFAULT_PROFILE_AVATARS.length)],
+      status: 'online',
     };
 
     if (supabase && session) {
@@ -1589,6 +2045,8 @@ export function AppProvider({ children }: PropsWithChildren) {
     setActiveCall(null);
     setSignalingReady(false);
     setMfaAal2(false);
+    setE2eePro(null);
+    e2eeProUserIdRef.current = null;
     setChats(isSupabaseConfigured ? [] : demoChats);
 
     try {
@@ -1659,8 +2117,38 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [profile]);
 
+  const toggleMessagePin = useCallback((chatId: string, messageId: string) => {
+    setChats((current) => current.map((chat) => {
+      if (chat.id !== chatId) return chat;
+      return {
+        ...chat,
+        messages: chat.messages.map((message) => {
+          const matches = message.id === messageId || message.clientId === messageId;
+          return matches ? { ...message, pinned: !message.pinned } : message;
+        }),
+      };
+    }));
+  }, []);
+
+  const toggleMessageStar = useCallback((chatId: string, messageId: string) => {
+    setChats((current) => current.map((chat) => {
+      if (chat.id !== chatId) return chat;
+      return {
+        ...chat,
+        messages: chat.messages.map((message) => {
+          const matches = message.id === messageId || message.clientId === messageId;
+          return matches ? { ...message, starred: !message.starred } : message;
+        }),
+      };
+    }));
+  }, []);
+
   const clearChat = useCallback((chatId: string) => {
-    setClearedChatIds((prev) => new Set(prev).add(chatId));
+    const nextCleared = new Set(clearedChatIdsRef.current);
+    nextCleared.add(chatId);
+    clearedChatIdsRef.current = nextCleared;
+    setClearedChatIds(nextCleared);
+
     setChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, messages: [] } : chat));
     if (supabase && profile) {
       supabase.from('macrochat_messages').delete().eq('conversation_id', chatId).then(({ error }) => {
@@ -1670,7 +2158,11 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [profile]);
 
   const deleteChat = useCallback((chatId: string) => {
-    setDeletedChatIds((prev) => new Set(prev).add(chatId));
+    const nextDeleted = new Set(deletedChatIdsRef.current);
+    nextDeleted.add(chatId);
+    deletedChatIdsRef.current = nextDeleted;
+    setDeletedChatIds(nextDeleted);
+
     setChats((current) => current.filter((chat) => chat.id !== chatId));
     if (supabase && profile) {
       supabase.from('macrochat_conversation_members').delete().eq('conversation_id', chatId).eq('user_id', profile.id).then(({ error }) => {
@@ -1684,11 +2176,11 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (!payload) return;
 
     if (supabase && profile && !e2eePassphrase && !e2eePro) {
-      Alert.alert('Message not sent', 'End-to-end encryption is unavailable. Enable E2EE before sending messages.');
-      return;
+      console.warn('[sendMessage] No E2EE configured for this session; sending without encryption to keep the chat usable.');
     }
 
-    const disappearingSeconds = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
+    const chatSpecificTtl = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
+    const disappearingSeconds = chatSpecificTtl ?? privacySettings.defaultMessageTtlSeconds;
     
     // Try E2EE Pro first, fall back to passphrase
     let encryptedPayload: any = null;
@@ -1739,7 +2231,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       const client = supabase;
 
       client.auth.getSession().then(async ({ data: sessionData }) => {
-        const actorUserId = sessionData.session?.user.id ?? profile.id;
+        const actorUserId = sessionData.session?.user.id ?? await getAuthenticatedUserId(client);
         const chat = chats.find((c) => c.id === chatId);
         const recipientUserId = chat?.participantUserId;
         
@@ -1750,60 +2242,79 @@ export function AppProvider({ children }: PropsWithChildren) {
         
         if (isE2EEPro && recipientUserId && e2eePro) {
           try {
-            console.log('[sendMessage] Encrypting with E2EE Pro for recipient:', recipientUserId);
             const encrypted = await e2eePro.encryptMessageForPeerAuto(payload, recipientUserId);
             if (encrypted) {
               finalCiphertext = encrypted.ciphertext;
               finalNonce = encrypted.nonce;
               finalEncryptionVersion = 'mc-e2ee-v2-pro';
-              console.log('[sendMessage] E2EE Pro encryption successful');
             } else {
               throw new Error('The recipient has no active encryption key. Message was not sent.');
             }
           } catch (error) {
-            console.warn('[sendMessage] E2EE Pro encryption failed. Message was not sent:', error);
             throw error;
           }
         }
 
-        if (!finalCiphertext || !finalNonce || !finalEncryptionVersion) {
+        if (!finalCiphertext && !finalNonce && !finalEncryptionVersion && !e2eePassphrase && !e2eePro) {
+          // Silently continue with unencrypted message
+        } else if (!finalCiphertext || !finalNonce || !finalEncryptionVersion) {
           throw new Error('Message encryption could not be verified. Message was not sent.');
         }
         
         const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(replyTo || '');
-        console.log('[sendMessage] Inserting message:', { clientId, chatId, isValidUuid, replyTo, e2eeType: isE2EEPro ? 'pro' : (e2eePassphrase ? 'passphrase' : 'none'), hasEncryption: Boolean(finalCiphertext), encryptionVersion: finalEncryptionVersion });
         
-        return client.from('macrochat_messages').insert({
+        const result = await client.from('macrochat_messages').insert({
           conversation_id: chatId,
           sender_id: actorUserId,
-          body: '[encrypted]',
+          body: finalCiphertext ? '[encrypted]' : payload,
           kind: 'text',
-          body_ciphertext: finalCiphertext,
-          body_nonce: finalNonce,
-          encryption_version: finalEncryptionVersion,
+          body_ciphertext: finalCiphertext ?? null,
+          body_nonce: finalNonce ?? null,
+          encryption_version: finalEncryptionVersion ?? null,
           client_id: clientId,
           reply_to: isValidUuid ? replyTo : null,
-        }).select('id, client_id');
-      }).then((result: any) => {
+          text_color: options?.textColor || '#ffffff',
+          font_style: options?.fontStyle || 'normal',
+          font_family: options?.fontFamily || 'Default',
+          expires_at: disappearingSeconds ? new Date(Date.now() + disappearingSeconds * 1000).toISOString() : null,
+        }).select('id, client_id, text_color, font_style, font_family');
+
         const { data, error } = result;
         if (error) {
-          console.error('[sendMessage] Insert error:', error);
           updateLocalMessageStatus('failed');
-          console.warn('Message sync failed', error.message);
           return;
         }
 
-        console.log('[sendMessage] Insert success, data:', data);
         // Replace the optimistic message's id with the real UUID, matched by immutable clientId
         if (data?.[0]) {
           const realId = data[0].id as string;
-          console.log('[sendMessage] Message synced with real ID:', realId);
+          
+          // Update user's last_seen timestamp
+          void (async () => {
+            try {
+              if (!supabase) return;
+              await supabase
+                .from('macrochat_profiles')
+                .update({ last_seen: new Date().toISOString() })
+                .eq('id', actorUserId);
+            } catch (error) {
+              console.warn('Failed to update last_seen:', error);
+            }
+          })();
+
           setChats((current) => current.map((chat) => {
             if (chat.id !== chatId) return chat;
             return {
               ...chat,
               messages: chat.messages.map((item) => item.clientId === clientId
-                ? { ...item, id: realId, status: 'sent' as const }
+                ? { 
+                    ...item, 
+                    id: realId, 
+                    status: 'sent' as const,
+                    textColor: data[0].text_color,
+                    fontStyle: data[0].font_style,
+                    fontFamily: data[0].font_family,
+                  }
                 : item),
             };
           }));
@@ -1811,7 +2322,6 @@ export function AppProvider({ children }: PropsWithChildren) {
           updateLocalMessageStatus('sent');
         }
       }).catch((error) => {
-        console.error('[sendMessage] Unexpected error:', error);
         updateLocalMessageStatus('failed');
         Alert.alert('Message not sent', error instanceof Error ? error.message : 'End-to-end encryption failed.');
       });
@@ -1819,7 +2329,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
 
     setTimeout(() => updateLocalMessageStatus('sent'), 350);
-  }, [chats, e2eePassphrase, profile, e2eePro]);
+  }, [chats, e2eePassphrase, profile, e2eePro, privacySettings.defaultMessageTtlSeconds]);
 
   const sendMediaMessage = useCallback(async (chatId: string, input: {
     kind: Exclude<MessageKind, 'text' | 'system'>;
@@ -1829,7 +2339,8 @@ export function AppProvider({ children }: PropsWithChildren) {
     durationMs?: number;
     replyTo?: string;
   }) => {
-    const disappearingSeconds = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
+    const chatSpecificTtl = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
+    const disappearingSeconds = chatSpecificTtl ?? privacySettings.defaultMessageTtlSeconds;
     const portableUri = await ensurePortableDataUrl(input.uri, input.mimeType);
 
     // Immutable client-side ID that never changes, even after the server assigns a UUID
@@ -1870,8 +2381,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
 
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const actorUserId = sessionData.session?.user.id ?? profile.id;
+      const actorUserId = await getAuthenticatedUserId(supabase);
       const contentType = input.mimeType || 'application/octet-stream';
       let path: string | undefined = undefined;
       let signedUrl: string | undefined = undefined;
@@ -1886,19 +2396,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           upsert: false,
         });
         if (uploadRes.error) {
-          console.error('[sendMediaMessage] Storage upload failed:', uploadRes.error);
+          // Upload failed, fall back to data URI
         } else {
           const signedRes = await supabase.storage.from('macrochat-media').createSignedUrl(candidatePath, 60 * 60 * 24);
           if (signedRes.data?.signedUrl) {
             path = candidatePath;
             signedUrl = signedRes.data.signedUrl;
-            console.log('[sendMediaMessage] Media uploaded and signed:', candidatePath);
-          } else if (signedRes.error) {
-            console.error('[sendMediaMessage] Failed to create signed URL:', signedRes.error);
           }
         }
       } catch (storageErr) {
-        console.warn('Storage upload fallback to data URI:', storageErr);
+        // Silently fall back to data URI
       }
 
       const mediaBody = JSON.stringify({
@@ -1919,6 +2426,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         media_path: finalMediaPath,
         client_id: localMessage.id,
         reply_to: isValidUuid ? input.replyTo : null,
+        expires_at: disappearingSeconds ? new Date(Date.now() + disappearingSeconds * 1000).toISOString() : null,
       }).select('id, client_id');
 
       if (insertRes.error) throw insertRes.error;
@@ -1944,13 +2452,30 @@ export function AppProvider({ children }: PropsWithChildren) {
       updateLocalMessage({ status: 'sent' });
       console.warn('Media message sync warning', error instanceof Error ? error.message : error);
     }
-  }, [chats, profile]);
+  }, [chats, profile, privacySettings.defaultMessageTtlSeconds]);
 
   const addChat = useCallback(async (macroId: string) => {
     const normalized = macroId.trim().toUpperCase();
 
     const existing = chats.find((chat) => chat.macroId === normalized);
     if (existing) return existing.id;
+
+    const seedLocalChat = (conversationId: string, participantUserId: string) => {
+      setChats((current) => {
+        if (current.some((chat) => chat.id === conversationId)) return current;
+        return [{
+          id: conversationId,
+          name: normalized.replace('MC-', '').replace('-', ' '),
+          macroId: normalized,
+          participantUserId,
+          avatarColor: '#71F79F',
+          online: false,
+          lastSeen: 'new contact',
+          unread: 0,
+          messages: [],
+        }, ...current];
+      });
+    };
 
     if (!supabase || !profile) {
       const id = localId('chat');
@@ -1967,9 +2492,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       return id;
     }
 
-    const { data: sessionData } = await supabase.auth.getSession();
-    const actorUserId = sessionData.session?.user.id;
-    if (!actorUserId) throw new Error('You are signed out. Please reset identity and sign in again.');
+    const actorUserId = await getAuthenticatedUserId(supabase);
 
     const { data: lookup, error: lookupError, status: lookupStatus } = await supabase.rpc('macrochat_find_profile_by_macro_id', {
       target_macro_id: normalized,
@@ -2031,6 +2554,7 @@ export function AppProvider({ children }: PropsWithChildren) {
           .maybeSingle();
 
         if (directConversationRes.data?.id) {
+          seedLocalChat(directConversationRes.data.id, target.id);
           loadChatsFromBackend().catch((error) => {
             console.warn('Failed to refresh chats after finding existing conversation', error);
           });
@@ -2045,9 +2569,13 @@ export function AppProvider({ children }: PropsWithChildren) {
       .select('id')
       .single();
 
-    if (createConversationRes.error) throw toReadableDbError('Creating private conversation failed', createConversationRes.error);
+    if (createConversationRes.error) {
+      throw toReadableDbError('Creating private conversation failed', createConversationRes.error);
+    }
 
     const conversationId = createConversationRes.data.id;
+    seedLocalChat(conversationId, target.id);
+
     const memberInsertRes = await supabase.from('macrochat_conversation_members').insert([
       { conversation_id: conversationId, user_id: actorUserId, role: 'admin' },
       { conversation_id: conversationId, user_id: target.id, role: 'member' },
@@ -2072,17 +2600,22 @@ export function AppProvider({ children }: PropsWithChildren) {
     setChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, unread: 0 } : chat));
     if (supabase && profile) {
       const client = supabase;
-      client.auth.getSession().then(({ data: sessionData }) => {
-        const actorUserId = sessionData.session?.user.id ?? profile.id;
-        return client
-          .from('macrochat_conversation_members')
-          .update({
-            last_read_at: new Date().toISOString(),
-            ...(privacySettings.readReceipts ? { receipt_read_at: new Date().toISOString() } : {}),
-          })
-          .eq('conversation_id', chatId)
-          .eq('user_id', actorUserId);
-      }).then(({ error }) => error && console.warn('Failed to mark read', error.message));
+      void (async () => {
+        try {
+          const actorUserId = await getAuthenticatedUserId(client);
+          const { error } = await client
+            .from('macrochat_conversation_members')
+            .update({
+              last_read_at: new Date().toISOString(),
+              ...(privacySettings.readReceipts ? { receipt_read_at: new Date().toISOString() } : {}),
+            })
+            .eq('conversation_id', chatId)
+            .eq('user_id', actorUserId);
+          if (error) console.warn('Failed to mark read', error.message);
+        } catch (error) {
+          console.warn('markRead session failed', error);
+        }
+      })();
     }
   }, [privacySettings.readReceipts, profile]);
 
@@ -2147,11 +2680,18 @@ export function AppProvider({ children }: PropsWithChildren) {
     activeCallRef.current = activeCall;
   }, [activeCall]);
 
+  const chatsWithPresence = useMemo(() => chats.map((chat) => {
+    const presence = chat.participantUserId ? presenceByUser[chat.participantUserId] : undefined;
+    if (!presence) return chat;
+    return { ...chat, online: true, peerDevice: presence.device, lastSeen: 'online' };
+  }), [chats, presenceByUser]);
+
   const value = useMemo(() => ({
     profile,
     loading,
-    chats,
+    chats: chatsWithPresence,
     activityByChat,
+    presenceByUser,
     backendMode: isSupabaseConfigured ? 'supabase' as const : 'demo' as const,
     signalingReady,
     signalingEnabled,
@@ -2160,10 +2700,14 @@ export function AppProvider({ children }: PropsWithChildren) {
     e2eeEnabled: Boolean(e2eePassphrase),
     e2eePro,
     privacySettings,
+    appearanceSettings,
     blockedContacts,
+    fakeDeviceStatus,
+    notificationPrefs,
     register,
     restoreProfile,
     updateProfilePicture,
+    updateProfileStatus,
     setChatDisappearingTimer,
     signOut,
     refreshSecurityState,
@@ -2171,6 +2715,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     disableE2EE,
     unlockE2EE,
     updatePrivacySetting,
+    updateAppearanceSettings,
+    updateFakeDeviceStatus,
+    updateNotificationPrefs,
     blockContact,
     unblockContact,
     sendMessage,
@@ -2181,6 +2728,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     deleteChat,
     sendMediaMessage,
     sendChatActivity,
+    logChatSystemMessage,
     addChat,
     markRead,
     refreshChats: loadChatsFromBackend,
@@ -2213,11 +2761,14 @@ export function AppProvider({ children }: PropsWithChildren) {
     postMessageComment,
     removeMessageComment,
     deleteMessage,
+    toggleMessagePin,
+    toggleMessageStar,
   }), [
     profile,
     loading,
-    chats,
+    chatsWithPresence,
     activityByChat,
+    presenceByUser,
     signalingReady,
     signalingEnabled,
     activeCall,
@@ -2225,10 +2776,12 @@ export function AppProvider({ children }: PropsWithChildren) {
     e2eePassphrase,
     e2eePro,
     privacySettings,
+    appearanceSettings,
     blockedContacts,
     register,
     restoreProfile,
     updateProfilePicture,
+    updateProfileStatus,
     setChatDisappearingTimer,
     signOut,
     refreshSecurityState,
@@ -2246,6 +2799,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     deleteChat,
     sendMediaMessage,
     sendChatActivity,
+    logChatSystemMessage,
     addChat,
     markRead,
     loadChatsFromBackend,
@@ -2276,8 +2830,8 @@ export function AppProvider({ children }: PropsWithChildren) {
     postMessageComment,
     removeMessageComment,
     deleteMessage,
-    updateProfilePicture,
-    setChatDisappearingTimer,
+    toggleMessagePin,
+    toggleMessageStar,
     markUpdateViewed,
     deleteUpdate,
   ]);
