@@ -1,6 +1,8 @@
 -- Cross-device privacy controls: read receipts, blocking, and disappearing messages.
 -- Run this before deploying the app bundle that uses these columns and RPCs.
 
+begin;
+
 alter table public.macrochat_conversation_members
   add column if not exists receipt_read_at timestamptz;
 
@@ -9,7 +11,14 @@ alter table public.macrochat_conversations
   check (message_ttl_seconds is null or message_ttl_seconds in (60, 3600, 86400, 604800, 2592000));
 
 alter table public.macrochat_messages
-  add column if not exists expires_at timestamptz;
+  add column if not exists pinned_at timestamptz,
+  add column if not exists starred_by_user_id uuid references public.macrochat_profiles(id) on delete set null,
+  add column if not exists expires_at timestamptz,
+  add column if not exists text_color text default '#ffffff',
+  add column if not exists font_style text default 'normal' check (font_style in ('normal', 'italic')),
+  add column if not exists font_family text default 'Default';
+
+commit;
 
 create table if not exists public.macrochat_user_privacy (
   user_id uuid primary key references public.macrochat_profiles(id) on delete cascade,
@@ -21,6 +30,9 @@ create table if not exists public.macrochat_user_privacy (
     check (default_message_ttl_seconds is null or default_message_ttl_seconds in (60, 3600, 86400, 604800, 2592000)),
   updated_at timestamptz not null default now()
 );
+
+alter table public.macrochat_user_privacy
+  add column if not exists show_device_status boolean not null default true;
 
 create table if not exists public.macrochat_blocked_users (
   blocker_id uuid not null references public.macrochat_profiles(id) on delete cascade,

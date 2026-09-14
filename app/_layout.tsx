@@ -1,14 +1,17 @@
 import 'react-native-gesture-handler';
 import { useEffect } from 'react';
-import { Stack } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { CallOverlay } from '@/components/CallOverlay';
 import { TabActivityBadge } from '@/components/TabActivityBadge';
 import { AppProvider } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
 
 export default function RootLayout() {
+  const router = useRouter();
+
   // react-native-web leaves the browser focus ring on inputs; strip it globally.
   useEffect(() => {
     if (Platform.OS !== 'web') return;
@@ -18,20 +21,35 @@ export default function RootLayout() {
     return () => style.remove();
   }, []);
 
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let cancelled = false;
+    let subscription: { remove: () => void } | undefined;
+    void import('expo-notifications').then((notifications) => {
+      if (cancelled) return;
+      subscription = notifications.addNotificationResponseReceivedListener((response) => {
+        const conversationId = response.notification.request.content.data?.conversationId;
+        if (typeof conversationId === 'string') router.push(`/chat/${conversationId}`);
+      });
+    }).catch(() => undefined);
+    return () => { cancelled = true; subscription?.remove(); };
+  }, [router]);
+
   return (
-    <AppProvider>
-      <StatusBar style="light" />
-      <TabActivityBadge />
-      <CallOverlay />
-      <Stack screenOptions={{
-        headerStyle: { backgroundColor: colors.black },
-        headerTintColor: colors.white,
-        contentStyle: { backgroundColor: colors.navy950 },
-        headerShadowVisible: false,
-        gestureEnabled: true,
-        fullScreenGestureEnabled: true,
-        animation: Platform.OS === 'ios' ? 'default' : 'fade',
-      }}>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <AppProvider>
+        <StatusBar style="light" />
+        <TabActivityBadge />
+        <CallOverlay />
+        <Stack screenOptions={{
+          headerStyle: { backgroundColor: colors.black },
+          headerTintColor: colors.white,
+          contentStyle: { backgroundColor: colors.navy950 },
+          headerShadowVisible: false,
+          gestureEnabled: true,
+          fullScreenGestureEnabled: true,
+          animation: Platform.OS === 'ios' ? 'default' : 'fade',
+        }}>
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="recover-account" options={{ headerShown: false }} />
         <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
@@ -40,14 +58,9 @@ export default function RootLayout() {
         <Stack.Screen name="new-chat" options={{ title: 'New chat', headerShown: Platform.OS === 'web' ? false : undefined, presentation: Platform.OS === 'web' ? 'card' : 'modal', animation: Platform.OS === 'web' ? 'fade' : 'slide_from_bottom' }} />
         <Stack.Screen name="scan-macro" options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
         <Stack.Screen name="camera" options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
-        <Stack.Screen name="security/mfa" options={{ headerShown: false }} />
-        <Stack.Screen name="security/account" options={{ headerShown: false }} />
-        <Stack.Screen name="security/privacy" options={{ headerShown: false }} />
-        <Stack.Screen name="security/notifications" options={{ headerShown: false }} />
-        <Stack.Screen name="security/appearance" options={{ headerShown: false }} />
-        <Stack.Screen name="security/storage" options={{ headerShown: false }} />
-        <Stack.Screen name="security/e2ee" options={{ headerShown: false }} />
+        <Stack.Screen name="security" options={{ headerShown: false }} />
       </Stack>
-    </AppProvider>
+      </AppProvider>
+    </GestureHandlerRootView>
   );
 }

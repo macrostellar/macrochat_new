@@ -9,8 +9,17 @@
  * 5. Device verification via fingerprint comparison
  */
 
+import * as ExpoCrypto from 'expo-crypto';
 import nacl from 'tweetnacl';
 import { decodeUTF8, encodeBase64, decodeBase64, encodeUTF8 } from 'tweetnacl-util';
+
+// React Native has no global crypto.getRandomValues, so tweetnacl needs an explicit CSPRNG.
+if (typeof globalThis.crypto?.getRandomValues !== 'function') {
+  nacl.setPRNG((x, n) => {
+    const bytes = ExpoCrypto.getRandomBytes(n);
+    for (let i = 0; i < n; i++) x[i] = bytes[i];
+  });
+}
 
 // ============================================================================
 // KEY PAIR GENERATION & STORAGE

@@ -43,6 +43,11 @@ create table if not exists public.macrochat_messages (
   kind text not null default 'text' check (kind in ('text', 'image', 'video', 'file', 'voice', 'system', 'call')),
   media_path text,
   reply_to uuid references public.macrochat_messages(id) on delete set null,
+  pinned_at timestamptz,
+  starred_by_user_id uuid references public.macrochat_profiles(id) on delete set null,
+  text_color text default '#ffffff',
+  font_style text default 'normal' check (font_style in ('normal', 'italic')),
+  font_family text default 'Default',
   created_at timestamptz not null default now(),
   edited_at timestamptz,
   deleted_at timestamptz,
@@ -60,6 +65,33 @@ create table if not exists public.macrochat_message_reactions (
 create index if not exists macrochat_messages_conversation_created_idx on public.macrochat_messages (conversation_id, created_at desc);
 create index if not exists macrochat_members_user_idx on public.macrochat_conversation_members (user_id, conversation_id);
 create index if not exists macrochat_profiles_macro_id_idx on public.macrochat_profiles (macro_id);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'macrochat_messages'
+      AND column_name = 'pinned_at'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS macrochat_messages_pinned_idx
+      ON public.macrochat_messages (conversation_id, pinned_at desc)
+      WHERE pinned_at is not null;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'macrochat_messages'
+      AND column_name = 'starred_by_user_id'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS macrochat_messages_starred_idx
+      ON public.macrochat_messages (starred_by_user_id, created_at desc)
+      WHERE starred_by_user_id is not null;
+  END IF;
+END $$;
 
 alter table public.macrochat_profiles enable row level security;
 alter table public.macrochat_conversations enable row level security;
@@ -179,6 +211,82 @@ drop policy if exists "macrochat members upload chat media" on storage.objects;
 create policy "macrochat members upload chat media" on storage.objects for insert to authenticated with check (
   bucket_id = 'macrochat-media' and public.macrochat_is_conversation_member((storage.foldername(name))[1]::uuid)
 );
+
+create or replace function public.macrochat_toggle_message_pin(message_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'macrochat_messages'
+      and column_name = 'pinned_at'
+  ) then
+    return;
+  end if;
+
+  update public.macrochat_messages
+  set pinned_at = case when pinned_at is not null then null else now() end
+  where id = message_id and exists (
+    select 1 from public.macrochat_messages m
+    where m.id = message_id and public.macrochat_is_conversation_member(m.conversation_id)
+  );
+end;
+$$;
+
+create or replace function public.macrochat_toggle_message_star(message_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'macrochat_messages'
+      and column_name = 'starred_by_user_id'
+  ) then
+    return;
+  end if;
+
+  update public.macrochat_messages
+  set starred_by_user_id = case when starred_by_user_id = auth.uid() then null else auth.uid() end
+  where id = message_id and exists (
+    select 1 from public.macrochat_messages m
+    where m.id = message_id and public.macrochat_is_conversation_member(m.conversation_id)
+  );
+end;
+$$;
+
+create or replace function public.macrochat_list_starred_messages()
+returns table (id uuid, conversation_id uuid, sender_id uuid, body text, kind text, created_at timestamptz, sender_name text, sender_avatar text)
+language plpgsql stable security definer set search_path = public
+as $$
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'macrochat_messages'
+      and column_name = 'starred_by_user_id'
+  ) then
+    return;
+  end if;
+
+  return query
+    select m.id, m.conversation_id, m.sender_id, m.body, m.kind, m.created_at, p.display_name, p.avatar_url
+    from public.macrochat_messages m
+    join public.macrochat_profiles p on p.id = m.sender_id
+    where m.starred_by_user_id = auth.uid()
+      and public.macrochat_is_conversation_member(m.conversation_id)
+    order by m.created_at desc
+    limit 100;
+end;
+$$;
+
+grant execute on function public.macrochat_toggle_message_pin(uuid) to authenticated;
+grant execute on function public.macrochat_toggle_message_star(uuid) to authenticated;
+grant execute on function public.macrochat_list_starred_messages() to authenticated;
 
 -- Enable Realtime once per table. Ignore duplicate-publication errors when rerunning.
 do $$ begin

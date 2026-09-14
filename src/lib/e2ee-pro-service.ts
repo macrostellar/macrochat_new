@@ -292,7 +292,7 @@ export class E2EEProService {
       );
 
       // Save to database
-      await supabase.from('macrochat_x3dh_key_bundles').upsert({
+      const { error } = await supabase.from('macrochat_x3dh_key_bundles').upsert({
         user_id: this.userId,
         device_id: this.deviceId,
         identity_public_key: bundle.identityKey,
@@ -302,8 +302,7 @@ export class E2EEProService {
         published_at: new Date(bundle.timestamp),
         is_active: true,
       }, { onConflict: 'user_id,device_id' });
-
-      console.log('X3DH key bundle published');
+      if (error) throw error;
     } catch (error) {
       console.error('Failed to publish X3DH key bundle:', error);
       throw error;
@@ -361,7 +360,7 @@ export class E2EEProService {
       // Save session to database
       const sessionKey = `${peerUserId}:${peerDeviceId}`;
 
-      const { data: inserted } = await supabase.from('macrochat_session_keys').upsert({
+      const { data: inserted, error: sessionError } = await supabase.from('macrochat_session_keys').upsert({
         user_id: this.userId,
         peer_user_id: peerUserId,
         device_id: this.deviceId,
@@ -373,6 +372,7 @@ export class E2EEProService {
         created_at: new Date(session.createdAt),
         is_active: true,
       }).select('id').single();
+      if (sessionError) throw sessionError;
 
       const keyId = inserted?.id || `sess-${Date.now()}`;
       this.sessionKeys.set(keyId, session);
@@ -504,7 +504,8 @@ export class E2EEProService {
         .order('published_at', { ascending: false })
         .limit(1);
 
-      if (error || !bundles || bundles.length === 0) {
+      if (error) throw error;
+      if (!bundles || bundles.length === 0) {
         console.warn('No active X3DH key bundles found for peer:', peerUserId);
         return null;
       }
@@ -513,7 +514,7 @@ export class E2EEProService {
       return await this.encryptMessageForPeer(plaintext, peerUserId, peerDeviceId);
     } catch (error) {
       console.error('Failed to encrypt message for peer:', error);
-      return null;
+      throw error;
     }
   }
 
@@ -711,12 +712,11 @@ export class E2EEProService {
    * Get device name based on platform.
    */
   private getDeviceName(): string {
-    // In production, detect actual device name
-    // For now, use a generic name
-    if (typeof navigator !== 'undefined') {
-      return `${navigator.userAgent.split(' ').pop()} - ${this.deviceId}`;
+    const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : undefined;
+    if (typeof userAgent === 'string' && userAgent.length > 0) {
+      return `${userAgent.split(' ').pop()} - ${this.deviceId}`;
     }
-    return this.deviceId;
+    return `${Platform.OS} - ${this.deviceId}`;
   }
 
   /**

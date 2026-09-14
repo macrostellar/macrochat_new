@@ -18,11 +18,38 @@ import { colors } from '@/theme/colors';
 import type { Message } from '@/types';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+function TypingIndicator() {
+  const [activeDot, setActiveDot] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActiveDot((prev) => (prev + 1) % 3);
+    }, 220);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <View style={styles.typingRow}>
+      {[0, 1, 2].map((index) => (
+        <View
+          key={index}
+          style={[
+            styles.typingDot,
+            { opacity: index === activeDot ? 1 : 0.35, transform: [{ scale: index === activeDot ? 1 : 0.75 }] },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
 function MessageTicks({ status }: { status: Message['status'] }) {
   if (status === 'sending') return <Text style={{ color: colors.muted, fontSize: 10 }}>◷</Text>;
   if (status === 'failed') return <Text style={{ color: colors.danger, fontSize: 10, fontWeight: '900' }}>!</Text>;
-  if (status === 'sent') return <Ionicons name="checkmark" size={15} color={colors.muted} />;
-  return <Ionicons name="checkmark-done" size={16} color={colors.neon} />;
+  if (status === 'sent') return <Ionicons name="checkmark" size={12} color={colors.muted} />;
+  if (status === 'delivered') return <Ionicons name="checkmark-done" size={14} color={colors.blue} />;
+  if (status === 'read') return <Ionicons name="checkmark-done" size={14} color={colors.neon} />;
+  return <Ionicons name="checkmark-done" size={14} color={colors.muted} />;
 }
 
 function deviceIcon(device?: 'mobile' | 'desktop' | 'web'): keyof typeof Ionicons.glyphMap {
@@ -96,12 +123,13 @@ export default function ConversationScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string | string[] }>();
   const chatId = Array.isArray(id) ? id[0] : id;
-  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, logChatSystemMessage, markRead, refreshChats, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall, pinChat, muteChat, clearChat, blockContact, deleteMessage, postMessageReaction, messageReactions, privacySettings, appearanceSettings } = useApp();
+  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, logChatSystemMessage, markRead, refreshChats, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall, pinChat, muteChat, clearChat, blockContact, deleteMessage, editMessage, setChatDisappearingTimer, postMessageReaction, messageReactions, appearanceSettings, toggleMessagePin, toggleMessageStar } = useApp();
   const chat = chats.find((item) => item.id === chatId);
   const e2eeActive = e2eeEnabled || Boolean(e2eePro);
-  const showDeviceStatus = Boolean(chat?.peerDevice && privacySettings.showDeviceStatus);
+  const showDeviceStatus = Boolean(chat?.peerDevice);
 
   const [text, setText] = useState('');
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [reply, setReply] = useState<Message | null>(null);
   const [resolvingMissing, setResolvingMissing] = useState(false);
   const [autoResolveAttempted, setAutoResolveAttempted] = useState(false);
@@ -115,6 +143,8 @@ export default function ConversationScreen() {
   const [profileViewer, setProfileViewer] = useState<{ name: string; macroId: string; avatarUrl?: string; avatarColor: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessage, setMenuMessage] = useState<Message | null>(null);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [editText, setEditText] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [preview, setPreview] = useState<{ uri: string; kind: 'image' | 'video'; fileName?: string; ratio?: number } | null>(null);
   const [videoRatios, setVideoRatios] = useState<Record<string, number>>({});
@@ -134,7 +164,23 @@ export default function ConversationScreen() {
     if (!chat) return [];
     return [...chat.messages].reverse();
   }, [chat]);
+
+  const resetReplySwipe = (messageId?: string | null) => {
+    const ref = messageId ? swipeableRefs.current[messageId] : null;
+    if (ref && typeof ref.close === 'function') {
+      ref.close();
+      return;
+    }
+
+    Object.values(swipeableRefs.current).forEach((swipeable) => {
+      if (swipeable && typeof swipeable.close === 'function') {
+        swipeable.close();
+      }
+    });
+  };
+
   const remoteActivity = chat ? activityByChat[chat.id] : undefined;
+  const activityChatId = chat?.id;
   const [manualActivityState, setManualActivityState] = useState<'recording' | 'screenshot' | null>(null);
   const textSizeMap = { compact: 14, comfortable: 15, large: 16, xl: 17 } as const;
   const wallpaperMap = {
@@ -145,6 +191,14 @@ export default function ConversationScreen() {
   } as const;
   const wall = wallpaperMap[appearanceSettings.wallpaper];
   const messageFontSize = textSizeMap[appearanceSettings.textSize];
+  const timerOptions = [
+    { label: 'Off', value: null },
+    { label: '1m', value: 60 },
+    { label: '1h', value: 3600 },
+    { label: '24h', value: 86400 },
+    { label: '7d', value: 604800 },
+    { label: '30d', value: 2592000 },
+  ] as const;
   const fontFamilyMap = {
     system: undefined,
     figtree: 'Figtree' as any,
@@ -155,15 +209,25 @@ export default function ConversationScreen() {
   } as const;
   const messageFontFamily = fontFamilyMap[appearanceSettings.fontFamily];
 
-  console.log('💬 Chat screen rendered with appearance:', { textSize: appearanceSettings.textSize, wallpaper: appearanceSettings.wallpaper, fontSize: messageFontSize, pageColor: wall.page, fontFamily: appearanceSettings.fontFamily });
-
   const remoteActivityLabel = remoteActivity
-    ? remoteActivity.state === 'recording'
-      ? 'recording voice note...'
-      : remoteActivity.state === 'screenshot'
-        ? 'taking a screenshot...'
-        : 'typing...'
+    ? remoteActivity.state === 'typing'
+      ? 'typing...'
+      : remoteActivity.state === 'recording'
+        ? 'recording voice note...'
+        : remoteActivity.state === 'screenshot'
+          ? 'taking a screenshot...'
+          : null
     : null;
+
+  const presenceColor = chat?.status === 'busy'
+    ? '#FFB84D'
+    : chat?.status === 'away'
+      ? '#7AC7FF'
+      : chat?.status === 'offline'
+        ? '#9CB2CC'
+        : colors.neon;
+  const pinnedMessage = chat?.messages.find((message) => message.pinned);
+  const unreadMessageCount = Math.max(0, (chat?.messages.filter((message) => message.senderId !== 'me' && !message.pinned && !message.starred).length ?? 0));
 
   useEffect(() => {
     if (!replyJumpTargetId) return;
@@ -212,36 +276,36 @@ export default function ConversationScreen() {
   }, []);
 
   useEffect(() => {
-    if (!chat) return;
+    if (!activityChatId || (Platform.OS === 'web' && width >= 820)) return;
 
     if (recording || webRecording) {
-      sendChatActivity(chat.id, 'recording');
+      sendChatActivity(activityChatId, 'recording');
       return () => {
-        sendChatActivity(chat.id, null);
+        sendChatActivity(activityChatId, null);
       };
     }
 
     if (manualActivityState) {
-      sendChatActivity(chat.id, manualActivityState);
+      sendChatActivity(activityChatId, manualActivityState);
       return () => {
-        sendChatActivity(chat.id, null);
+        sendChatActivity(activityChatId, null);
       };
     }
 
     if (!text.trim()) {
-      sendChatActivity(chat.id, null);
+      sendChatActivity(activityChatId, null);
       return;
     }
 
-    sendChatActivity(chat.id, 'typing');
+    sendChatActivity(activityChatId, 'typing');
     const timeoutHandle = setTimeout(() => {
-      sendChatActivity(chat.id, null);
+      sendChatActivity(activityChatId, null);
     }, 1600);
 
     return () => {
       clearTimeout(timeoutHandle);
     };
-  }, [chat, manualActivityState, recording, webRecording, text, sendChatActivity]);
+  }, [activityChatId, manualActivityState, recording, webRecording, text, sendChatActivity, width]);
 
   if (Platform.OS === 'web' && width >= 820) {
     return <WebMessenger initialChatId={chatId} />;
@@ -554,7 +618,7 @@ export default function ConversationScreen() {
     sendMessage(chat.id, payload, replyId);
     setText('');
     if (replyId) {
-      swipeableRefs.current[replyId]?.close?.();
+      resetReplySwipe(replyId);
     }
     setReply(null);
     sendChatActivity(chat.id, null);
@@ -665,7 +729,7 @@ export default function ConversationScreen() {
         <Pressable onPress={() => setProfileViewer({ name: chat.name, macroId: chat.macroId, avatarUrl: chat.avatarUrl, avatarColor: chat.avatarColor })}>
           <Avatar name={chat.name} color={chat.avatarColor} size={38} online={chat.online} imageUrl={chat.avatarUrl} />
         </Pressable>
-        <View style={styles.person}><Text style={styles.name} numberOfLines={1}>{chat.name}</Text><Text style={[styles.presence, chat.online && { color: colors.neon }, remoteActivity && styles.presenceActive]} numberOfLines={1}>{remoteActivityLabel ?? chat.lastSeen}</Text></View>
+        <View style={styles.person}><Text style={styles.name} numberOfLines={1}>{chat.name}</Text><Text style={[styles.presence, { color: presenceColor }]} numberOfLines={1}>{chat.lastSeen}</Text></View>
         <Pressable style={styles.action} hitSlop={6} onPress={() => {
           setManualActivityState((current) => {
             const next = current === 'screenshot' ? null : 'screenshot';
@@ -698,15 +762,32 @@ export default function ConversationScreen() {
           </View>
         </View>
       )}
+      <View style={{ flex: 1 }}>
       <FlatList
         ref={list}
         data={messages}
         inverted
+        ListHeaderComponent={
+          pinnedMessage ? (
+            <Pressable
+              style={styles.pinnedMessageBar}
+              onPress={() => {
+                setReplyJumpTargetId(pinnedMessage.id);
+                list.current?.scrollToIndex({ index: messages.findIndex((message) => message.id === pinnedMessage.id), viewPosition: 0.5, animated: true });
+              }}
+            >
+              <Ionicons name="pin" size={13} color={colors.white} />
+              <Text style={styles.pinnedMessageText} numberOfLines={1}>{pinnedMessage.text || 'Pinned message'}</Text>
+              <Ionicons name="chevron-forward" size={14} color={colors.white} />
+            </Pressable>
+          ) : null
+        }
         style={styles.messagesList}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.messages}
         maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
         scrollEventThrottle={16}
+        onScroll={(event) => setAwayFromBottom(event.nativeEvent.contentOffset.y > 160)}
         onContentSizeChange={() => {
           if (!pendingSendScroll.current) return;
           list.current?.scrollToOffset({ offset: 0, animated: false });
@@ -734,6 +815,12 @@ export default function ConversationScreen() {
           }
 
           const mine = item.senderId === 'me';
+          const isSticker = item.kind === 'image' && (
+            Boolean(item.fileName?.toLowerCase().startsWith('sticker-')) ||
+            Boolean(item.text?.toLowerCase().includes('sticker')) ||
+            Boolean(item.mediaPath?.toLowerCase().includes('sticker')) ||
+            Boolean(item.mediaUrl?.toLowerCase().includes('sticker'))
+          );
           const replied = item.replyTo ? chat.messages.find((message) => message.id === item.replyTo) : null;
           const isVideo = isVideoMessage(item);
           const isImage = !isVideo && (item.kind === 'image' || Boolean(
@@ -773,6 +860,7 @@ export default function ConversationScreen() {
               <View style={[
                 styles.bubble,
                 mine ? { ...styles.mine, backgroundColor: wall.bubbleMine } : { ...styles.theirs, backgroundColor: wall.bubble },
+                isSticker && { backgroundColor: 'transparent', borderWidth: 0, padding: 0 },
                 item.id === replyJumpTargetId && styles.replyJumpFlash,
               ]}>
                 {item.expiresAt && <MessageTimerBorder expiresAt={item.expiresAt} createdAt={item.createdAt} radius={17} />}
@@ -792,8 +880,8 @@ export default function ConversationScreen() {
                     <Text style={styles.voiceLabel}>{isPlaying ? formatDuration(playbackPosition) : voiceLabel}</Text>
                   </View>
                 ) : imagePayload ? (
-                  <Pressable style={styles.mediaFrame} onPress={() => setPreview({ uri: imagePayload.uri, kind: 'image', fileName: imagePayload.name })}>
-                    <Image source={{ uri: imagePayload.uri }} style={styles.imageBubble} resizeMode="cover" />
+                  <Pressable style={isSticker ? undefined : styles.mediaFrame} onPress={() => setPreview({ uri: imagePayload.uri, kind: 'image', fileName: imagePayload.name })}>
+                    <Image source={{ uri: imagePayload.uri }} style={isSticker ? { width: 132, height: 132, backgroundColor: 'transparent' } : styles.imageBubble} resizeMode={isSticker ? 'contain' : 'cover'} />
                   </Pressable>
                 ) : videoPayload ? (
                   <Pressable style={styles.mediaFrame} onPress={() => setPreview({ uri: videoPayload.uri, kind: 'video', fileName: videoPayload.name, ratio: videoRatios[item.id] })}>
@@ -854,6 +942,26 @@ export default function ConversationScreen() {
           );
         }}
       />
+      {awayFromBottom && (
+        <View style={{ position: 'absolute', bottom: 12, right: 14, alignItems: 'center' }}>
+          {unreadMessageCount > 0 && (
+            <View style={{ position: 'absolute', right: -2, top: -8, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5, zIndex: 2 }}>
+              <Text style={{ color: colors.navy950, fontSize: 10, fontWeight: '900' }}>{unreadMessageCount > 9 ? '9+' : unreadMessageCount}</Text>
+            </View>
+          )}
+          <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest message" style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border }} onPress={() => { list.current?.scrollToOffset({ offset: 0, animated: true }); setAwayFromBottom(false); }}><Ionicons name="arrow-down" size={23} color={colors.white} /></Pressable>
+        </View>
+      )}
+      </View>
+      {remoteActivity && (
+        <View style={{ paddingHorizontal: 18, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {remoteActivity.state === 'typing' ? (
+            <TypingIndicator />
+          ) : (
+            <Text accessibilityLiveRegion="polite" style={{ color: colors.neon, fontSize: 13 }}>{remoteActivityLabel}</Text>
+          )}
+        </View>
+      )}
       {attachmentPanelOpen && (
         <View style={styles.attachmentPanel}>
           <Pressable style={styles.attachmentAction} onPress={() => { setAttachmentPanelOpen(false); attachFromCamera().catch(() => Alert.alert('Unable to open camera', 'Please try again.')); }}>
@@ -870,7 +978,7 @@ export default function ConversationScreen() {
           </Pressable>
         </View>
       )}
-      {reply && <View style={styles.replying}><View style={{ flex: 1 }}><Text style={styles.replyTitle}>Replying</Text><Text numberOfLines={1} style={styles.replyPreview}>{reply.text}</Text></View><Pressable onPress={() => setReply(null)}><Ionicons name="close" color={colors.muted} size={22} /></Pressable></View>}
+      {reply && <View style={styles.replying}><View style={{ flex: 1 }}><Text style={styles.replyTitle}>Replying</Text><Text numberOfLines={1} style={styles.replyPreview}>{reply.text}</Text></View><Pressable onPress={() => { resetReplySwipe(reply.id); setReply(null); }}><Ionicons name="close" color={colors.muted} size={22} /></Pressable></View>}
       {(recording || webRecording) && (
         <View style={styles.recordingBanner}>
           <View style={styles.recordingDot} />
@@ -889,6 +997,16 @@ export default function ConversationScreen() {
             <Avatar name={profileViewer.name} color={profileViewer.avatarColor} size={120} imageUrl={profileViewer.avatarUrl} />
             <Text style={styles.profileModalName}>{profileViewer.name}</Text>
             <Text style={styles.profileModalMacro}>{profileViewer.macroId}</Text>
+            <View style={styles.profileStatusRow}>
+              <View style={[styles.statusDot, { backgroundColor: chat?.online ? colors.neon : colors.muted }]} />
+              <Text style={styles.profileStatus}>{chat.lastSeen}</Text>
+            </View>
+            {chat?.peerDevice && (
+              <View style={styles.profileDeviceRow}>
+                <Ionicons name={chat.peerDevice === 'mobile' ? 'phone-portrait' : chat.peerDevice === 'desktop' ? 'laptop' : 'globe'} size={14} color={colors.blue} />
+                <Text style={styles.profileDevice}>Using {chat.peerDevice}</Text>
+              </View>
+            )}
             <Text style={styles.profileModalMeta}>Contact profile</Text>
           </Pressable>
         </Pressable>
@@ -908,6 +1026,24 @@ export default function ConversationScreen() {
               <Ionicons name="person-circle-outline" size={18} color={colors.white} />
               <Text style={styles.menuItemText}>View contact</Text>
             </Pressable>
+            <Pressable style={styles.menuItem} onPress={() => { router.push('/chat/starred'); setHeaderMenuOpen(false); }}>
+              <Ionicons name="star-outline" size={18} color={colors.yellow} />
+              <Text style={styles.menuItemText}>Starred messages</Text>
+            </Pressable>
+            <View style={styles.timerSection}>
+              <Text style={styles.timerTitle}>Disappearing messages</Text>
+              <View style={styles.timerGrid}>
+                {timerOptions.map((option) => (
+                  <Pressable
+                    key={option.label}
+                    style={[styles.timerChip, chat.disappearingSeconds === option.value && styles.timerChipActive]}
+                    onPress={() => { setChatDisappearingTimer(chat.id, option.value); setHeaderMenuOpen(false); }}
+                  >
+                    <Text style={[styles.timerChipText, chat.disappearingSeconds === option.value && styles.timerChipTextActive]}>{option.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
             <Pressable style={styles.menuItem} onPress={() => { clearChat(chat.id); setHeaderMenuOpen(false); }}>
               <Ionicons name="trash-outline" size={18} color={colors.white} />
               <Text style={styles.menuItemText}>Clear chat</Text>
@@ -960,12 +1096,101 @@ export default function ConversationScreen() {
               onPress={() => {
                 const target = menuMessage;
                 setMenuMessage(null);
+                if (target) {
+                  toggleMessagePin(chat.id, target.id);
+                }
+              }}
+            >
+              <Ionicons name={menuMessage?.pinned ? 'pin' : 'pin-outline'} size={18} color={colors.blue} />
+              <Text style={[styles.menuItemText, { color: colors.blue }]}>{menuMessage?.pinned ? 'Unpin' : 'Pin'}</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                const target = menuMessage;
+                setMenuMessage(null);
+                if (target) {
+                  toggleMessageStar(chat.id, target.id);
+                }
+              }}
+            >
+              <Ionicons name={menuMessage?.starred ? 'star' : 'star-outline'} size={18} color={colors.yellow} />
+              <Text style={[styles.menuItemText, { color: colors.yellow }]}>{menuMessage?.starred ? 'Unstar' : 'Star'}</Text>
+            </Pressable>
+            {menuMessage && menuMessage.senderId === 'me' && (
+              <Pressable
+                style={styles.menuItem}
+                onPress={() => {
+                  if (menuMessage) {
+                    setEditingMessage(menuMessage);
+                    setEditText(menuMessage.text);
+                    setMenuMessage(null);
+                  }
+                }}
+              >
+                <Ionicons name="pencil-outline" size={18} color={colors.neon} />
+                <Text style={[styles.menuItemText, { color: colors.neon }]}>Edit</Text>
+              </Pressable>
+            )}
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                const target = menuMessage;
+                setMenuMessage(null);
                 if (target) deleteMessage(chat.id, target.id);
               }}
             >
               <Ionicons name="trash-outline" size={18} color={colors.danger} />
               <Text style={[styles.menuItemText, { color: colors.danger }]}>Delete</Text>
             </Pressable>
+          </Pressable>
+        </Pressable>
+      )}
+
+      {editingMessage && (
+        <Pressable style={styles.sheetBackdrop} onPress={() => setEditingMessage(null)}>
+          <Pressable style={styles.sheetCard} onPress={() => undefined}>
+            <Text style={{ color: colors.white, fontSize: 16, fontWeight: '800', marginBottom: 12 }}>Edit message</Text>
+            <TextInput
+              value={editText}
+              onChangeText={setEditText}
+              placeholder="Message text..."
+              placeholderTextColor={colors.muted}
+              style={{
+                backgroundColor: colors.navy900,
+                color: colors.white,
+                borderWidth: 1,
+                borderColor: colors.border,
+                borderRadius: 8,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                fontSize: 14,
+                maxHeight: 120,
+                marginBottom: 12,
+              }}
+              multiline
+              maxLength={4000}
+            />
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <Pressable
+                style={[styles.menuItem, { flex: 1, marginHorizontal: 0 }]}
+                onPress={() => setEditingMessage(null)}
+              >
+                <Text style={styles.menuItemText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.menuItem, { flex: 1, marginHorizontal: 0, backgroundColor: colors.neon }]}
+                onPress={() => {
+                  if (editingMessage && editText.trim()) {
+                    editMessage(chat.id, editingMessage.id, editText);
+                    setEditingMessage(null);
+                    setEditText('');
+                  }
+                }}
+              >
+                <Text style={[styles.menuItemText, { color: colors.navy900, fontWeight: '800' }]}>Save</Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       )}
@@ -1033,7 +1258,7 @@ export default function ConversationScreen() {
               }
             } : undefined}
           />
-          <Pressable style={styles.emojiToggle} hitSlop={8} accessibilityLabel="Emoji" onPress={() => setEmojiOpen((open) => !open)}><Ionicons name="happy-outline" size={22} color={emojiOpen ? colors.neon : colors.muted} /></Pressable>
+          <Pressable style={styles.emojiToggle} hitSlop={8} accessibilityLabel="Emoji" onPress={() => setEmojiOpen(false)}><Ionicons name="happy-outline" size={22} color={emojiOpen ? colors.neon : colors.muted} /></Pressable>
         </View>
         <Pressable style={[styles.send, recording && styles.sendRecording]} onPress={onPrimaryAction}><Ionicons name={text.trim() ? 'send' : (recording ? 'stop' : 'mic')} size={21} color={colors.navy950} /></Pressable>
       </View>
@@ -1048,8 +1273,10 @@ const styles = StyleSheet.create({
   missing: { color: colors.white, margin: 30, textAlign: 'center' },
   retry: { alignSelf: 'center', marginTop: 8, borderRadius: 12, backgroundColor: colors.blue, paddingHorizontal: 16, paddingVertical: 10 },
   retryText: { color: colors.navy950, fontWeight: '800', fontSize: 13 },
-  header: { height: 62, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, gap: 9, backgroundColor: colors.navy900, borderBottomWidth: 1, borderBottomColor: colors.border }, back: { padding: 5 }, person: { flex: 1 }, name: { color: colors.white, fontSize: 16, fontWeight: '800' }, presence: { color: colors.muted, fontSize: 11, marginTop: 2 }, presenceActive: { color: colors.neon }, action: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
+  header: { height: 62, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, gap: 9, backgroundColor: colors.navy900, borderBottomWidth: 1, borderBottomColor: colors.border }, back: { padding: 5 }, person: { flex: 1 }, name: { color: colors.white, fontSize: 16, fontWeight: '800' }, presence: { color: colors.muted, fontSize: 11, marginTop: 2 }, presenceActive: { color: colors.neon }, action: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' }, typingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 2 }, typingDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.neon },
   encryption: { alignSelf: 'center', flexDirection: 'row', gap: 5, marginTop: 10, backgroundColor: colors.navy800, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 }, encryptionText: { color: colors.muted, fontSize: 10 },
+  pinnedMessageBar: { marginHorizontal: 12, marginTop: 8, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.30)', backgroundColor: colors.navy900, paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 8, zIndex: 20, shadowColor: 'rgba(0,0,0,0.2)', shadowOpacity: 0.18, shadowRadius: 7, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
+  pinnedMessageText: { flex: 1, color: colors.white, fontSize: 12, fontWeight: '700' },
   callBanner: { marginHorizontal: 12, marginTop: 8, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, padding: 10 },
   callBannerText: { color: colors.white, fontWeight: '700', fontSize: 12 },
   callBannerActions: { marginTop: 8, flexDirection: 'row', gap: 8 },
@@ -1091,8 +1318,15 @@ const styles = StyleSheet.create({
   reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
   reactionPill: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999, backgroundColor: colors.navy700, borderWidth: 1, borderColor: colors.border },
   reactionPillText: { fontSize: 12 },
-  menuBackdrop: { position: 'absolute', inset: 0, backgroundColor: 'rgba(2, 6, 16, 0.6)', zIndex: 60 },
-  headerMenuCard: { position: 'absolute', top: 58, right: 10, minWidth: 210, borderRadius: 16, backgroundColor: colors.navy900, borderWidth: 1, borderColor: colors.border, paddingVertical: 8 },
+  menuBackdrop: { position: 'absolute', inset: 0, backgroundColor: 'rgba(2, 6, 16, 0.6)', zIndex: 100 },
+  headerMenuCard: { position: 'absolute', top: 58, right: 10, minWidth: 210, borderRadius: 16, backgroundColor: colors.navy900, borderWidth: 1, borderColor: colors.border, paddingVertical: 8, zIndex: 101 },
+  timerSection: { paddingHorizontal: 18, paddingVertical: 12, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, marginVertical: 4 },
+  timerTitle: { color: colors.muted, fontSize: 11, fontWeight: '800', marginBottom: 8, letterSpacing: 0.5 },
+  timerGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  timerChip: { minWidth: 52, paddingHorizontal: 8, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  timerChipActive: { backgroundColor: colors.blue, borderColor: colors.blue },
+  timerChipText: { color: colors.white, fontSize: 11, fontWeight: '700' },
+  timerChipTextActive: { color: colors.navy950 },
   sheetBackdrop: { position: 'absolute', inset: 0, backgroundColor: 'rgba(2, 6, 16, 0.6)', justifyContent: 'flex-end', zIndex: 60 },
   sheetCard: { borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: colors.navy900, borderWidth: 1, borderColor: colors.border, paddingTop: 10, paddingBottom: 24 },
   sheetEmojiRow: { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 8, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
@@ -1127,6 +1361,11 @@ const styles = StyleSheet.create({
   profileModalClose: { position: 'absolute', top: 12, right: 12, width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
   profileModalName: { color: colors.white, fontSize: 24, fontWeight: '900', marginTop: 18 },
   profileModalMacro: { color: colors.blue, fontSize: 13, fontWeight: '800', marginTop: 6 },
+  profileStatusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 10 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  profileStatus: { color: colors.muted, fontSize: 12, fontWeight: '600' },
+  profileDeviceRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 6 },
+  profileDevice: { color: colors.blue, fontSize: 12, fontWeight: '600' },
   profileModalMeta: { color: colors.muted, fontSize: 11, marginTop: 10 },
   composer: {
     flexDirection: 'row',

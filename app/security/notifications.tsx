@@ -1,14 +1,14 @@
-import { useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Screen } from '@/components/Screen';
 import { WebSettingsShell } from '@/components/WebSections';
 import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
-import { requestNotificationPermission } from '@/lib/notifications';
+import { hasNotificationPermission, requestNotificationPermission } from '@/lib/notifications';
+import { getRingtoneLabel } from '@/lib/ringtones';
 
-type NotificationCategory = 'messages' | 'groups' | 'calls' | 'status' | 'updates';
 type NotificationSetting = 'on' | 'mentions' | 'off';
 
 function NotificationToggle({ label, detail, value, options, onChange }: { label: string; detail: string; value: NotificationSetting; options: NotificationSetting[]; onChange: (value: NotificationSetting) => void }) {
@@ -41,18 +41,21 @@ export default function NotificationsScreen() {
   const router = useRouter();
   const { notificationPrefs, updateNotificationPrefs } = useApp();
   const isWide = Platform.OS === 'web' && width >= 820;
-  const [permissionStatus, setPermissionStatus] = useState<'default' | 'granted' | 'denied'>('default');
+  const [permissionGranted, setPermissionGranted] = useState(true);
 
-  // Handle permission request button press
+  useEffect(() => {
+    void hasNotificationPermission().then(setPermissionGranted);
+  }, []);
+
   const handleRequestPermission = async () => {
     const granted = await requestNotificationPermission();
-    setPermissionStatus(granted ? 'granted' : 'denied');
-    
-    if (granted) {
-      alert('✓ Notifications enabled!\nYou will now receive notifications.');
-    } else {
-      alert('⚠ Permission denied.\nPlease check your browser settings to enable notifications.');
-    }
+    setPermissionGranted(granted);
+    Alert.alert(
+      granted ? 'Notifications enabled' : 'Permission denied',
+      granted
+        ? 'MacroChat can now alert you about messages and calls.'
+        : 'Enable notifications for MacroChat in your device settings to receive alerts.'
+    );
   };
 
   const handleSettingChange = async (key: keyof typeof notificationPrefs, value: any) => {
@@ -78,7 +81,7 @@ export default function NotificationsScreen() {
 
       <Text style={styles.section}>NOTIFICATION TYPES</Text>
       <Text style={styles.intro}>Choose which notifications you want to receive from each category.</Text>
-      {Platform.OS === 'web' && typeof Notification !== 'undefined' && Notification.permission !== 'granted' && (
+      {!permissionGranted && (
         <Pressable style={styles.permissionButton} onPress={handleRequestPermission}>
           <Ionicons name="notifications-outline" size={18} color={colors.navy950} />
           <Text style={styles.permissionButtonText}>Enable notifications</Text>
@@ -90,13 +93,6 @@ export default function NotificationsScreen() {
         value={notificationPrefs.messages}
         options={['on', 'mentions', 'off']}
         onChange={(value) => handleSettingChange('messages', value)}
-      />
-      <NotificationToggle
-        label="Group chats"
-        detail="Group conversations"
-        value={notificationPrefs.groups}
-        options={['on', 'mentions', 'off']}
-        onChange={(value) => handleSettingChange('groups', value)}
       />
       <NotificationToggle
         label="Calls"
@@ -120,11 +116,33 @@ export default function NotificationsScreen() {
         onChange={(value) => handleSettingChange('updates', value)}
       />
 
+      <Text style={styles.section}>SOUNDS</Text>
+      <Pressable style={styles.row} onPress={() => router.push('/security/ringtone?target=message')}>
+        <View style={styles.icon}>
+          <Ionicons name="musical-notes-outline" size={20} color={colors.blue} />
+        </View>
+        <View style={styles.copy}>
+          <Text style={styles.rowTitle}>Message tone</Text>
+          <Text style={styles.detail}>{getRingtoneLabel(notificationPrefs.messageRingtone)}</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+      </Pressable>
+      <Pressable style={styles.row} onPress={() => router.push('/security/ringtone?target=call')}>
+        <View style={styles.icon}>
+          <Ionicons name="call-outline" size={20} color={colors.blue} />
+        </View>
+        <View style={styles.copy}>
+          <Text style={styles.rowTitle}>Call ringtone</Text>
+          <Text style={styles.detail}>{getRingtoneLabel(notificationPrefs.callRingtone)}</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={20} color={colors.muted} />
+      </Pressable>
+
       <Text style={styles.section}>NOTIFICATION BEHAVIOR</Text>
       <NotificationToggleSwitch
         icon="volume-mute-outline"
         title="Play sound"
-        detail="Play sound when new messages arrive."
+        detail="Play your chosen tone when new messages or calls arrive."
         value={notificationPrefs.sound}
         onChange={(value) => handleSettingChange('sound', value)}
       />

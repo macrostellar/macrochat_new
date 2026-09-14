@@ -18,7 +18,6 @@ export const defaultAppearanceSettings: AppearanceSettings = {
 
 export type NotificationPreferences = {
   messages: 'on' | 'mentions' | 'off';
-  groups: 'on' | 'mentions' | 'off';
   calls: 'on' | 'off';
   status: 'on' | 'mentions' | 'off';
   updates: 'on' | 'off';
@@ -27,11 +26,13 @@ export type NotificationPreferences = {
   preview: boolean;
   badge: boolean;
   backgroundSync: boolean;
+  /** Ringtone id from the built-in catalog, or `custom:<uri>` for a device file. */
+  messageRingtone: string;
+  callRingtone: string;
 };
 
 export const defaultNotificationPreferences: NotificationPreferences = {
   messages: 'on',
-  groups: 'on',
   calls: 'on',
   status: 'mentions',
   updates: 'on',
@@ -40,6 +41,8 @@ export const defaultNotificationPreferences: NotificationPreferences = {
   preview: true,
   badge: true,
   backgroundSync: true,
+  messageRingtone: 'beep-high',
+  callRingtone: 'midnight-watch',
 };
 
 export type Profile = {
@@ -123,6 +126,7 @@ export type Chat = {
   avatarColor: string;
   avatarUrl?: string;
   online: boolean;
+  status?: ProfileStatus;
   peerDevice?: 'mobile' | 'desktop' | 'web';
   lastSeen: string;
   unread: number;

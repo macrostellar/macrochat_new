@@ -1,196 +1,169 @@
-import { Platform } from 'react-native';
+import { Platform, Vibration } from 'react-native';
 import type { NotificationPreferences } from '@/types';
+import { playMessageTone, startCallRingtone, stopCallRingtone } from './ringtones';
 
-type NotificationCategory = 'messages' | 'groups' | 'calls' | 'status' | 'updates';
+// Push notifications are unavailable in Expo Go on SDK 53+ — only works in a development build.
+let Notifications: typeof import('expo-notifications') | null = null;
+let CALL_CHANNEL_ID = 'calls';
+let MESSAGE_CHANNEL_ID = 'messages';
+try {
+  if (Platform.OS !== 'web') Notifications = require('expo-notifications');
+  const { CALL_CHANNEL_ID: cid, MESSAGE_CHANNEL_ID: mid } = require('./push');
+  CALL_CHANNEL_ID = cid;
+  MESSAGE_CHANNEL_ID = mid;
+} catch {
+  // OK — running in Expo Go or environment doesn't support push.
+}
 
-/**
- * Production-safe logger - only logs in development
- */
-const prodLog = {
-  log: (..._args: any[]) => {
-    // Silent in production
-  },
-  error: (..._args: any[]) => {
-    // Silent in production
-  },
-};
+export type NotificationCategory = 'messages' | 'calls' | 'status' | 'updates';
 
-/**
- * Check if a notification should be triggered based on user preferences
- */
+const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
+
+if (isNative && Notifications) {
+  Notifications.setNotificationHandler({
+    // This handler only runs while the app is foregrounded. Remote pushes are
+    // suppressed here because the realtime listener already raised a local
+    // alert with the user's chosen ringtone; showing both would double up.
+    handleNotification: async (notification) => {
+      const isLocal = notification.request.content.data?.local === true;
+      return {
+        shouldShowBanner: isLocal,
+        shouldShowList: isLocal,
+        shouldPlaySound: false,
+        shouldSetBadge: true,
+      };
+    },
+  });
+}
+
 export function shouldNotify(
   category: NotificationCategory,
   prefs: NotificationPreferences,
   options?: { isMention?: boolean }
 ): boolean {
   const setting = prefs[category];
-  
-  // 'calls' only has 'on' | 'off'
-  if (category === 'calls') {
-    return setting === 'on';
-  }
-
-  // Others have 'on' | 'mentions' | 'off'
   if (setting === 'on') return true;
   if (setting === 'mentions' && options?.isMention) return true;
   return false;
 }
 
-/**
- * Show a browser notification (web only)
- */
-export function showBrowserNotification(
-  title: string,
-  options?: {
-    body?: string;
-    icon?: string;
-    badge?: string;
-    tag?: string;
-    requireInteraction?: boolean;
+export async function requestNotificationPermission(): Promise<boolean> {
+  if (isNative && Notifications) {
+    const existing = await Notifications.getPermissionsAsync();
+    if (existing.granted) return true;
+    if (!existing.canAskAgain) return false;
+    return (await Notifications.requestPermissionsAsync()).granted;
   }
-): void {
-  if (Platform.OS !== 'web' || typeof Notification === 'undefined') return;
 
-  if (Notification.permission !== 'granted') {
-    console.log('⚠️ Notification permission not granted');
+  if (Platform.OS !== 'web' || typeof Notification === 'undefined') return false;
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied') return false;
+  try {
+    return (await Notification.requestPermission()) === 'granted';
+  } catch {
+    return false;
+  }
+}
+
+export async function hasNotificationPermission(): Promise<boolean> {
+  if (!isNative || !Notifications) {
+    if (Platform.OS !== 'web' || typeof Notification === 'undefined') return false;
+    return Notification.permission === 'granted';
+  }
+  return (await Notifications.getPermissionsAsync()).granted;
+}
+
+export function vibrateDevice(pattern: number | number[] = 200): void {
+  if (isNative) {
+    Vibration.vibrate(pattern as number);
+    return;
+  }
+  if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.vibrate) {
+    navigator.vibrate(pattern);
+  }
+}
+
+async function presentNotification(
+  title: string,
+  body: string,
+  options: { category: NotificationCategory; badge: boolean; icon?: string }
+): Promise<void> {
+  if (isNative && Notifications) {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title,
+        body,
+        badge: options.badge ? 1 : undefined,
+        data: { category: options.category, local: true },
+        ...(Platform.OS === 'android'
+          ? { channelId: options.category === 'calls' ? CALL_CHANNEL_ID : MESSAGE_CHANNEL_ID }
+          : {}),
+      },
+      trigger: null,
+    }).catch(() => undefined);
     return;
   }
 
+  if (Platform.OS !== 'web' || typeof Notification === 'undefined') return;
+  if (Notification.permission !== 'granted') return;
   try {
     new Notification(title, {
-      body: options?.body,
-      icon: options?.icon || '/favicon.ico',
-      badge: options?.badge,
-      tag: options?.tag,
-      requireInteraction: options?.requireInteraction,
+      body,
+      icon: options.icon || '/favicon.ico',
+      tag: options.category,
+      requireInteraction: options.category === 'calls',
     });
-  } catch (error) {
-    // Silent fail in production
+  } catch {
+    // A failed banner must never break message delivery.
   }
 }
 
-/**
- * Play notification sound
- */
-export async function playNotificationSound(): Promise<void> {
-  if (Platform.OS === 'web') {
-    try {
-      // Create a simple beep sound using Web Audio API
-      const audioContext = new (window as any).AudioContext || new (window as any).webkitAudioContext();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-
-      oscillator.frequency.value = 800; // Hz
-      oscillator.type = 'sine';
-
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.5);
-    } catch (error) {
-      // Silent fail in production
-    }
-  }
-}
-
-/**
- * Trigger a vibration (mobile only)
- */
-export function vibrateDevice(duration: number = 200): void {
-  if (Platform.OS === 'web') {
-    if (navigator.vibrate) {
-      navigator.vibrate(duration);
-    }
-  }
-}
-
-/**
- * Request notification permission (web only)
- */
-export async function requestNotificationPermission(): Promise<boolean> {
-  if (Platform.OS !== 'web' || typeof Notification === 'undefined') {
-    return false;
-  }
-
-  if (Notification.permission === 'granted') {
-    return true;
-  }
-
-  if (Notification.permission !== 'denied') {
-    try {
-      const result = await Notification.requestPermission();
-      return result === 'granted';
-    } catch (error) {
-      return false;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Main function to handle notification trigger
- */
 export async function triggerNotification(
   category: NotificationCategory,
   prefs: NotificationPreferences,
   options: {
     title: string;
     body?: string;
-    senderName?: string;
     messagePreview?: string;
     icon?: string;
     isMention?: boolean;
   }
 ): Promise<void> {
-  // Check if notification should be shown
-  if (!shouldNotify(category, prefs, { isMention: options.isMention })) {
-    return;
+  if (!shouldNotify(category, prefs, { isMention: options.isMention })) return;
+
+  let body = options.body || options.messagePreview || '';
+  if (!prefs.preview) {
+    body = category === 'calls' ? 'Incoming call' : 'New message';
+  } else if (body.length > 120) {
+    body = `${body.slice(0, 120)}…`;
   }
 
-  // Build notification message
-  let notificationBody = options.body || options.messagePreview || '';
-  if (prefs.preview && options.messagePreview && options.messagePreview.length > 100) {
-    notificationBody = options.messagePreview.substring(0, 100) + '...';
-  } else if (!prefs.preview) {
-    notificationBody = 'New message';
-  }
+  await presentNotification(options.title, body, {
+    category,
+    badge: prefs.badge,
+    icon: options.icon,
+  });
 
-  // Show browser notification
-  if (prefs.preview) {
-    showBrowserNotification(options.title, {
-      body: notificationBody,
-      icon: options.icon,
-      tag: category,
-      requireInteraction: category === 'calls',
-    });
-  } else {
-    showBrowserNotification(options.title, {
-      body: 'You have a new message',
-      tag: category,
-    });
-  }
-
-  // Play sound if enabled
   if (prefs.sound) {
-    await playNotificationSound();
+    if (category === 'calls') {
+      await startCallRingtone(prefs.callRingtone).catch(() => undefined);
+    } else {
+      await playMessageTone(prefs.messageRingtone).catch(() => undefined);
+    }
   }
 
-  // Vibrate if enabled
   if (prefs.vibration) {
-    vibrateDevice(200);
+    vibrateDevice(category === 'calls' ? [0, 500, 500, 500] : 200);
   }
 }
 
-/**
- * Determine notification category from message or event
- */
+/** Stops the looping call ringtone once a call is answered, declined or missed. */
+export async function stopCallAlert(): Promise<void> {
+  await stopCallRingtone().catch(() => undefined);
+  if (isNative) Vibration.cancel();
+}
+
 export function getCategoryFromMessage(options: {
-  isGroup?: boolean;
   isCall?: boolean;
   isStatus?: boolean;
   isUpdate?: boolean;
@@ -198,6 +171,5 @@ export function getCategoryFromMessage(options: {
   if (options.isCall) return 'calls';
   if (options.isStatus) return 'status';
   if (options.isUpdate) return 'updates';
-  if (options.isGroup) return 'groups';
   return 'messages';
 }

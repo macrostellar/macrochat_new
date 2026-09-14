@@ -130,13 +130,19 @@ export default function ChatsScreen() {
         ListEmptyComponent={<Text style={styles.empty}>No conversations found.</Text>}
         renderItem={({ item }) => {
           const last = item.messages[item.messages.length - 1];
-          const isRead = last?.status === 'read';
+          let tickMark = '';
+          let tickColor: string = colors.muted;
+          if (last?.senderId === 'me') {
+            if (last?.status === 'sent') { tickMark = '✓'; tickColor = colors.muted; }
+            else if (last?.status === 'delivered') { tickMark = '✓✓'; tickColor = colors.blue; }
+            else if (last?.status === 'read') { tickMark = '✓✓'; tickColor = colors.neon; }
+          }
           return (
             <Pressable style={({ pressed }) => [styles.chat, pressed && { backgroundColor: colors.navy800 }]} onPress={() => router.push({ pathname: '/chat/[id]', params: { id: item.id } })}>
               <Avatar name={item.name} color={item.avatarColor} online={item.online} />
               <View style={styles.chatBody}>
                 <View style={styles.chatTop}><Text style={styles.chatName} numberOfLines={1}>{item.name}</Text><Text style={[styles.time, item.unread > 0 && { color: colors.neon }]}>{last ? timeLabel(last.createdAt) : 'New'}</Text></View>
-                <View style={styles.chatBottom}><Text style={styles.preview} numberOfLines={1}>{last?.senderId === 'me' ? 'You: ' : ''}{last?.text ?? 'Start a private conversation'}</Text><View style={styles.readReceipts}>{last?.senderId === 'me' && <Text style={[styles.tick, isRead ? { color: colors.neon } : { color: colors.blue }]}>✓✓</Text>}</View>{item.unread > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{item.unread}</Text></View>}</View>
+                <View style={styles.chatBottom}><Text style={styles.preview} numberOfLines={1}>{last?.senderId === 'me' ? 'You: ' : ''}{last?.text ?? 'Start a private conversation'}</Text><View style={styles.readReceipts}>{Boolean(tickMark) && <Text style={[styles.tick, { color: tickColor }]}>{tickMark}</Text>}</View>{item.unread > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{item.unread}</Text></View>}</View>
               </View>
             </Pressable>
           );

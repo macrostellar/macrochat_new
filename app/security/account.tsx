@@ -32,7 +32,7 @@ function normalizeContact(method: AccountContactMethod, value: string) {
 export default function AccountSecurityScreen() {
   const { width } = useWindowDimensions();
   const router = useRouter();
-  const { loading, profile } = useApp();
+  const { loading, profile, updateProfileDisplayName } = useApp();
   const [state, setState] = useState<RecoveryState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [method, setMethod] = useState<AccountContactMethod>('email');
@@ -42,6 +42,8 @@ export default function AccountSecurityScreen() {
   const [busy, setBusy] = useState(false);
   const [resendIn, setResendIn] = useState(0);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editingName, setEditingName] = useState('');
 
   const refresh = useCallback(async () => {
     setLoadError(null);
@@ -146,6 +148,30 @@ export default function AccountSecurityScreen() {
     setNotice(null);
   };
 
+  const handleEditName = () => {
+    setEditingName(profile?.displayName || '');
+    setIsEditingName(true);
+  };
+
+  const handleSaveName = async () => {
+    try {
+      if (!editingName.trim()) {
+        setNotice({ tone: 'error', text: 'Enter at least two characters.' });
+        return;
+      }
+      await updateProfileDisplayName(editingName);
+      setIsEditingName(false);
+      setNotice({ tone: 'success', text: 'Your display name has been updated.' });
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'Failed to update display name.' });
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditingName(false);
+    setEditingName('');
+  };
+
   const connectedValue = method === 'email' ? state?.email : state?.phone;
 
   const content = (
@@ -176,6 +202,45 @@ export default function AccountSecurityScreen() {
         )}
 
         {notice && <View style={[styles.notice, notice.tone === 'error' ? styles.noticeError : styles.noticeSuccess]}><Ionicons name={notice.tone === 'error' ? 'alert-circle-outline' : 'checkmark-circle-outline'} color={notice.tone === 'error' ? colors.danger : colors.neon} size={20} /><Text style={styles.noticeText}>{notice.text}</Text>{notice.canRecover && <Pressable accessibilityRole="button" onPress={() => router.push('/recover-account')}><Text style={styles.noticeAction}>Recover account</Text></Pressable>}</View>}
+
+        {profile && (
+          <>
+            <View style={styles.sectionHeading}>
+              <Text style={styles.section}>PROFILE</Text>
+            </View>
+            {!isEditingName ? (
+              <View style={styles.profileRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.profileLabel}>Display name</Text>
+                  <Text style={styles.profileValue}>{profile.displayName}</Text>
+                </View>
+                <Pressable onPress={handleEditName} style={styles.editButton}>
+                  <Ionicons name="pencil-outline" size={18} color={colors.blue} />
+                </Pressable>
+              </View>
+            ) : (
+              <View style={styles.editSection}>
+                <TextInput
+                  value={editingName}
+                  onChangeText={setEditingName}
+                  placeholder="Your display name"
+                  placeholderTextColor={colors.muted}
+                  style={styles.editInput}
+                  maxLength={32}
+                  autoFocus
+                />
+                <View style={styles.editButtons}>
+                  <Pressable onPress={handleSaveName} style={[styles.editButton, styles.editButtonPrimary]}>
+                    <Text style={styles.editButtonText}>Save</Text>
+                  </Pressable>
+                  <Pressable onPress={handleCancelEdit} style={[styles.editButton, styles.editButtonSecondary]}>
+                    <Text style={[styles.editButtonText, { color: colors.muted }]}>Cancel</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+          </>
+        )}
 
         <View style={styles.sectionHeading}><Text style={styles.section}>CONNECTED METHODS</Text><Pressable accessibilityRole="button" accessibilityLabel="Refresh recovery status" onPress={refresh} disabled={busy}><Ionicons name="refresh" color={colors.blue} size={18} /></Pressable></View>
         <View style={styles.methodRow}><Ionicons name="mail-outline" color={colors.blue} size={20} /><Text style={styles.methodLabel}>Email</Text><Text style={styles.methodValue}>{state?.email ?? 'Not connected'}</Text></View>
@@ -266,4 +331,14 @@ const styles = StyleSheet.create({
   errorText: { color: colors.muted, fontSize: 13, lineHeight: 19, textAlign: 'center' },
   retry: { minHeight: 40, paddingHorizontal: 18, backgroundColor: colors.blue, alignItems: 'center', justifyContent: 'center' },
   retryText: { color: colors.navy950, fontWeight: '900' },
+  profileRow: { paddingVertical: 12, paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  profileLabel: { color: colors.muted, fontSize: 12, marginBottom: 4 },
+  profileValue: { color: colors.white, fontSize: 15, fontWeight: '800' },
+  editButton: { padding: 8, borderRadius: 8 },
+  editSection: { paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  editInput: { height: 44, borderRadius: 8, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy900, paddingHorizontal: 12, color: colors.white, fontSize: 15, marginBottom: 12 },
+  editButtons: { flexDirection: 'row', gap: 8 },
+  editButtonPrimary: { flex: 1, height: 40, backgroundColor: colors.blue, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  editButtonSecondary: { flex: 1, height: 40, backgroundColor: colors.navy900, borderRadius: 8, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  editButtonText: { color: colors.white, fontWeight: '800', fontSize: 14 },
 });

@@ -1,4 +1,4 @@
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useState } from 'react';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
@@ -29,9 +29,11 @@ const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: stri
 
 export default function SettingsScreen() {
   const { width } = useWindowDimensions();
-  const { profile, backendMode, signOut, updateProfilePicture, updateProfileStatus } = useApp();
+  const { profile, backendMode, signOut, updateProfilePicture, updateProfileStatus, updateProfileDisplayName } = useApp();
   const [showSignOutModal, setShowSignOutModal] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editingName, setEditingName] = useState('');
   if (Platform.OS === 'web' && width >= 820) return <WebSettings />;
   if (!profile) return null;
   const qrPayload = `macrochat://add?macroId=${encodeURIComponent(profile.macroId)}`;
@@ -85,6 +87,30 @@ export default function SettingsScreen() {
     setShowSignOutModal(false);
   };
 
+  const handleEditName = () => {
+    setEditingName(profile?.displayName || '');
+    setIsEditingName(true);
+  };
+
+  const handleSaveName = async () => {
+    try {
+      if (!editingName.trim()) {
+        Alert.alert('Invalid name', 'Enter at least two characters.');
+        return;
+      }
+      await updateProfileDisplayName(editingName);
+      setIsEditingName(false);
+      Alert.alert('Name updated', 'Your display name has been changed.');
+    } catch (error) {
+      Alert.alert('Update failed', error instanceof Error ? error.message : 'Try again.');
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditingName(false);
+    setEditingName('');
+  };
+
   return (
     <Screen>
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -95,7 +121,12 @@ export default function SettingsScreen() {
             <Avatar name={profile.displayName} color={profile.avatarColor} size={64} online imageUrl={profile.avatarUrl} />
           </Pressable>
           <View style={{ flex: 1 }}>
-            <Text style={styles.name}>{profile.displayName}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={styles.name}>{profile.displayName}</Text>
+              <Pressable onPress={handleEditName} style={{ padding: 4 }}>
+                <Ionicons name="pencil-outline" size={16} color={colors.blue} />
+              </Pressable>
+            </View>
             <Pressable
               onPress={() => copyToClipboard(profile.macroId)}
             >
@@ -104,6 +135,29 @@ export default function SettingsScreen() {
             <Text style={[styles.mode, { color: statusOptions.find((option) => option.value === profile.status)?.color ?? colors.neon }]}>● {statusOptions.find((option) => option.value === profile.status)?.label ?? 'Online'}</Text>
           </View>
         </View>
+
+        {isEditingName && (
+          <View style={styles.editNameSection}>
+            <Text style={styles.editNameLabel}>Edit display name</Text>
+            <TextInput
+              value={editingName}
+              onChangeText={setEditingName}
+              placeholder="Your display name"
+              placeholderTextColor={colors.muted}
+              style={styles.editNameInput}
+              maxLength={32}
+              autoFocus
+            />
+            <View style={styles.editNameButtons}>
+              <Pressable onPress={handleSaveName} style={[styles.editNameButton, styles.editNameButtonPrimary]}>
+                <Text style={styles.editNameButtonText}>Save</Text>
+              </Pressable>
+              <Pressable onPress={handleCancelEdit} style={[styles.editNameButton, styles.editNameButtonSecondary]}>
+                <Text style={[styles.editNameButtonText, { color: colors.muted }]}>Cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
 
         <View style={styles.statusPicker}>
           <Text style={styles.avatarTitle}>Status</Text>
@@ -344,4 +398,45 @@ const styles = StyleSheet.create({
   },
   resetText: { color: colors.danger, fontWeight: '800' },
   version: { color: colors.muted, textAlign: 'center', fontSize: 11, marginBottom: 40 },
+  editNameSection: {
+    marginHorizontal: 20,
+    marginBottom: 18,
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: colors.navy800,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  editNameLabel: { color: colors.white, fontWeight: '800', fontSize: 14, marginBottom: 10 },
+  editNameInput: {
+    height: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.navy900,
+    paddingHorizontal: 14,
+    color: colors.white,
+    fontSize: 16,
+    marginBottom: 12,
+  },
+  editNameButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  editNameButton: {
+    flex: 1,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editNameButtonPrimary: {
+    backgroundColor: colors.blue,
+  },
+  editNameButtonSecondary: {
+    backgroundColor: colors.navy900,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  editNameButtonText: { color: colors.white, fontWeight: '800', fontSize: 14 },
 });

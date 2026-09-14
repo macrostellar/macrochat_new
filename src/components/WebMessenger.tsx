@@ -16,16 +16,31 @@ import { colors } from '@/theme/colors';
 import type { Chat, Message } from '@/types';
 
 function TypingIndicator() {
-  const [dots, setDots] = useState(1);
-  
+  const [activeDot, setActiveDot] = useState(0);
+
   useEffect(() => {
     const interval = setInterval(() => {
-      setDots((prev) => (prev < 3 ? prev + 1 : 1));
-    }, 400);
+      setActiveDot((prev) => (prev + 1) % 3);
+    }, 220);
     return () => clearInterval(interval);
   }, []);
-  
-  return <Text style={{ letterSpacing: 1 }}>typing{'.'.repeat(dots)}</Text>;
+
+  return (
+    <View style={styles.typingRow}>
+      {[0, 1, 2].map((index) => (
+        <View
+          key={index}
+          style={[
+            styles.typingDot,
+            {
+              opacity: index === activeDot ? 1 : 0.35,
+              transform: [{ scale: index === activeDot ? 1 : 0.75 }],
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
 }
 
 function formatClipDuration(ms?: number) {
@@ -291,6 +306,17 @@ function Conversation({ chat }: { chat: Chat }) {
   const audioChunksRef = useRef<Blob[]>([]);
   const inputRef = useRef<any>(null);
   const messages = useMemo(() => [...chat.messages].reverse(), [chat.messages]);
+  const pinnedMessage = chat.messages.find((message) => message.pinned);
+  const pinnedHeader = pinnedMessage ? (
+    <Pressable
+      style={styles.pinnedBanner}
+      onPress={() => jumpToMessage(pinnedMessage.id || pinnedMessage.clientId)}
+    >
+      <Ionicons name="pin" size={13} color={colors.white} />
+      <Text style={styles.pinnedBannerText} numberOfLines={1}>{pinnedMessage.text || 'Pinned message'}</Text>
+      <Ionicons name="chevron-forward" size={14} color={colors.white} />
+    </Pressable>
+  ) : null;
   const searchMatches = useMemo(() => {
     const search = messageSearchQuery.trim().toLowerCase();
     if (!search) return [] as number[];
@@ -312,13 +338,16 @@ function Conversation({ chat }: { chat: Chat }) {
     return messages.filter((_, index) => searchMatches.includes(index));
   }, [messageSearchQuery, messages, searchMatches, showMessageSearch]);
   const activity = activityByChat[chat.id];
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [manualActivityState, setManualActivityState] = useState<'recording' | 'screenshot' | null>(null);
   const activityLabel = activity
-    ? activity.state === 'recording'
-      ? 'recording voice note...'
-      : activity.state === 'screenshot'
-        ? 'taking a screenshot...'
-        : 'typing...'
+    ? activity.state === 'typing'
+      ? 'typing...'
+      : activity.state === 'recording'
+        ? 'recording voice note...'
+        : activity.state === 'screenshot'
+          ? 'taking a screenshot...'
+          : null
     : null;
 
   useEffect(() => {
@@ -326,14 +355,14 @@ function Conversation({ chat }: { chat: Chat }) {
       Animated.timing(messageSearchAnim, {
         toValue: 1,
         duration: 220,
-        useNativeDriver: true,
+        useNativeDriver: false,
       }).start();
       requestAnimationFrame(() => messageSearchRef.current?.focus?.());
     } else {
       Animated.timing(messageSearchAnim, {
         toValue: 0,
         duration: 160,
-        useNativeDriver: true,
+        useNativeDriver: false,
       }).start();
     }
   }, [messageSearchAnim, showMessageSearch]);
@@ -739,12 +768,26 @@ function Conversation({ chat }: { chat: Chat }) {
           <View style={styles.mobilePersonInfo}>
             <Text style={styles.personName}>{chat.name}</Text>
             {activity ? (
-              <Text style={[styles.presence, styles.presenceActive]}>{activity.state === 'recording' ? 'recording voice note...' : activity.state === 'screenshot' ? 'taking a screenshot...' : 'typing...'}</Text>
-            ) : chat.online ? (
-              <Text style={[styles.presence, styles.presenceActive]}>online</Text>
-            ) : (
-              <Text style={styles.presence}>{chat.lastSeen}</Text>
-            )}
+              activity.state === 'typing' ? (
+                <TypingIndicator />
+              ) : (
+                <Text style={[styles.presence, styles.presenceActive]}>{activity.state === 'recording' ? 'recording voice note...' : 'taking a screenshot...'}</Text>
+              )
+            ) : (() => {
+              const statusColor = chat.status === 'busy'
+                ? '#FFB84D'
+                : chat.status === 'away'
+                  ? '#7AC7FF'
+                  : chat.status === 'offline'
+                    ? '#9CB2CC'
+                    : colors.neon;
+
+              return chat.online ? (
+                <Text style={[styles.presence, { color: statusColor }]}>{chat.lastSeen}</Text>
+              ) : (
+                <Text style={[styles.presence, { color: '#9CB2CC' }]}>{chat.lastSeen}</Text>
+              );
+            })()}
           </View>
           <Pressable
             accessibilityLabel="More tools"
@@ -802,17 +845,31 @@ function Conversation({ chat }: { chat: Chat }) {
           <View style={styles.person}>
             <Text style={styles.personName}>{chat.name}</Text>
             {activity ? (
-              <Text style={[styles.presence, styles.presenceActive]}>
-                {activity.state === 'recording' ? 'recording voice note...' : activity.state === 'screenshot' ? 'taking a screenshot...' : 'typing...'}
-              </Text>
-            ) : chat.online ? (
-              <View style={styles.presenceRow}>
-                <View style={styles.presenceDot} />
-                <Text style={[styles.presence, styles.presenceActive]}>online</Text>
-              </View>
-            ) : (
-              <Text style={styles.presence}>{chat.lastSeen}</Text>
-            )}
+              activity.state === 'typing' ? (
+                <TypingIndicator />
+              ) : (
+                <Text style={[styles.presence, styles.presenceActive]}>
+                  {activity.state === 'recording' ? 'recording voice note...' : 'taking a screenshot...'}
+                </Text>
+              )
+            ) : (() => {
+              const statusColor = chat.status === 'busy'
+                ? '#FFB84D'
+                : chat.status === 'away'
+                  ? '#7AC7FF'
+                  : chat.status === 'offline'
+                    ? '#9CB2CC'
+                    : colors.neon;
+
+              return chat.online ? (
+                <View style={styles.presenceRow}>
+                  <View style={[styles.presenceDot, { backgroundColor: statusColor }]} />
+                  <Text style={[styles.presence, { color: statusColor }]}>{chat.lastSeen}</Text>
+                </View>
+              ) : (
+                <Text style={[styles.presence, { color: '#9CB2CC' }]}>{chat.lastSeen}</Text>
+              );
+            })()}
           </View>
           <Pressable
             accessibilityLabel="Screenshot activity"
@@ -949,15 +1006,19 @@ function Conversation({ chat }: { chat: Chat }) {
         </View>
       )}
 
+      <View style={{ flex: 1 }}>
       <FlatList
         ref={list}
         data={filteredMessages}
         inverted
+        ListHeaderComponent={pinnedHeader}
         keyExtractor={(item) => item.id}
         style={styles.messageList}
         contentContainerStyle={styles.messageContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        scrollEventThrottle={16}
+        onScroll={(event) => setAwayFromBottom(event.nativeEvent.contentOffset.y > 160)}
         renderItem={({ item, index }) => {
           if (item.kind === 'call') {
             return <CallMessageBubble item={item} />;
@@ -977,7 +1038,9 @@ function Conversation({ chat }: { chat: Chat }) {
           const mine = item.senderId === 'me';
           const isSticker = Boolean(
             item.fileName?.toLowerCase().startsWith('sticker-') ||
-            item.text?.toLowerCase().includes('sticker')
+            item.text?.toLowerCase().includes('sticker') ||
+            item.mediaPath?.toLowerCase().includes('sticker') ||
+            item.mediaUrl?.toLowerCase().includes('sticker')
           );
           const isImage = item.kind === 'image' || Boolean(
             item.mediaUrl?.startsWith('data:image/') ||
@@ -1118,6 +1181,27 @@ function Conversation({ chat }: { chat: Chat }) {
         }}
       />
 
+      {awayFromBottom && (
+        <View style={{ position: 'absolute', bottom: 12, right: 18, alignItems: 'center' }}>
+          {messages.filter((message) => message.senderId !== 'me' && message.createdAt > new Date(Date.now() - 60000).toISOString()).length > 0 && (
+            <View style={{ position: 'absolute', right: -2, top: -8, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5, zIndex: 2 }}>
+              <Text style={{ color: colors.navy950, fontSize: 10, fontWeight: '900' }}>{Math.min(9, messages.filter((message) => message.senderId !== 'me' && message.createdAt > new Date(Date.now() - 60000).toISOString()).length)}</Text>
+            </View>
+          )}
+          <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest message" style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border }} onPress={() => { setShowMessageSearch(false); setMessageSearchQuery(''); requestAnimationFrame(() => list.current?.scrollToOffset({ offset: 0, animated: true })); setAwayFromBottom(false); }}><Ionicons name="arrow-down" size={23} color={colors.white} /></Pressable>
+        </View>
+      )}
+      </View>
+      {activity && (activity.state === 'typing' || activity.state === 'recording' || activity.state === 'screenshot') && (
+        <View style={{ paddingHorizontal: 20, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {activity.state === 'typing' ? (
+            <TypingIndicator />
+          ) : (
+            <Text accessibilityLiveRegion="polite" style={{ color: colors.neon, fontSize: 13 }}>{activityLabel}</Text>
+          )}
+        </View>
+      )}
+
       {/* FLOATING MESSAGE ACTION MENU (rendered outside the inverted list so it can never be clipped by a row's own stacking context) */}
       {activeMenuMessage && menuAnchor && (
         <View
@@ -1146,7 +1230,8 @@ function Conversation({ chat }: { chat: Chat }) {
               <Avatar name={profileViewer.name} color={profileViewer.avatarColor} size={120} imageUrl={profileViewer.avatarUrl} />
               <Text style={styles.profileModalName}>{profileViewer.name}</Text>
               <Text style={styles.profileModalMacro}>{profileViewer.macroId}</Text>
-              <Text style={styles.profileModalMeta}>Contact profile</Text>
+              <Text style={[styles.profileModalMeta, { color: chat.online ? colors.neon : colors.muted }]}>{chat.lastSeen}</Text>
+              {chat.peerDevice && <View style={styles.presenceRow}><Ionicons name={deviceIcon(chat.peerDevice)} size={18} color={colors.blue} /><Text style={styles.profileModalMeta}>{deviceLabel(chat.peerDevice)}</Text></View>}
             </Pressable>
           </Pressable>
         </Modal>
@@ -1303,7 +1388,7 @@ function Conversation({ chat }: { chat: Chat }) {
 
         <View style={styles.optionsContainer}>
           <View style={styles.inputShell}>
-            <Pressable onPress={() => setShowEmojiPicker(!showEmojiPicker)} style={{ paddingRight: 6 }}>
+            <Pressable onPress={() => setShowEmojiPicker(false)} style={{ paddingRight: 6 }}>
               <Ionicons name="happy-outline" size={21} color={showEmojiPicker ? colors.neon : colors.blue} />
             </Pressable>
 
@@ -1497,9 +1582,13 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
 
                   <View style={styles.chatLine}>
                     {rowActivity ? (
-                      <Text style={[styles.preview, styles.previewTyping]} numberOfLines={1}>
-                        {rowActivity.state === 'recording' ? 'recording voice note...' : rowActivity.state === 'screenshot' ? 'taking a screenshot...' : 'typing...'}
-                      </Text>
+                      rowActivity.state === 'typing' ? (
+                        <TypingIndicator />
+                      ) : (
+                        <Text style={[styles.preview, styles.previewTyping]} numberOfLines={1}>
+                          {rowActivity.state === 'recording' ? 'recording voice note...' : 'taking a screenshot...'}
+                        </Text>
+                      )
                     ) : (
                       <>
                         {last?.senderId === 'me' && (
@@ -1628,6 +1717,8 @@ const styles = StyleSheet.create({
   presenceActive: { color: colors.neon },
   presenceRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
   presenceDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.neon },
+  typingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 2 },
+  typingDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.neon },
   deviceFlag: { position: 'absolute', top: 68, right: 26, zIndex: 6, alignItems: 'center' },
   deviceFlagRope: { width: 1, height: 12, backgroundColor: 'rgba(120, 204, 255, 0.45)' },
   deviceFlagBody: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 4, borderTopLeftRadius: 4, borderTopRightRadius: 4, borderBottomLeftRadius: 10, borderBottomRightRadius: 10, backgroundColor: colors.navy800, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.32)' },
@@ -1635,6 +1726,8 @@ const styles = StyleSheet.create({
   headerAction: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
   encryption: { position: 'absolute', top: 80, zIndex: 2, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, height: 25, borderRadius: 5, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border },
   encryptionText: { color: colors.muted, fontSize: 9 },
+  pinnedBanner: { position: 'relative', zIndex: 25, marginHorizontal: 12, marginTop: 8, marginBottom: 0, borderRadius: 10, backgroundColor: colors.navy900, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 9, flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: 'rgba(0,0,0,0.2)', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  pinnedBannerText: { flex: 1, color: colors.white, fontSize: 12, fontWeight: '700' },
   messageList: { flex: 1, zIndex: 1 },
   messageSearchBar: { position: 'absolute', top: 68, left: 0, right: 0, zIndex: 40, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: 'rgba(10, 19, 30, 0.97)', borderBottomWidth: 1, borderBottomColor: colors.border, overflow: 'hidden' },
   messageSearchRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -1801,8 +1894,8 @@ const styles = StyleSheet.create({
   previewActionsRow: { position: 'absolute', bottom: 28, left: 0, right: 0, alignItems: 'center' },
   previewDownloadButton: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999, backgroundColor: 'rgba(13, 22, 35, 0.84)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
   previewDownloadText: { color: colors.white, fontSize: 13, fontWeight: '700' },
-  profileModalBackdrop: { flex: 1, backgroundColor: 'rgba(2, 6, 16, 0.78)', alignItems: 'center', justifyContent: 'center', padding: 20 },
-  profileModalCard: { width: '100%', maxWidth: 360, backgroundColor: colors.navy900, borderRadius: 24, borderWidth: 1, borderColor: colors.border, paddingTop: 24, paddingBottom: 18, paddingHorizontal: 18, alignItems: 'center', position: 'relative' },
+  profileModalBackdrop: { flex: 1, backgroundColor: 'rgba(2, 6, 16, 0.78)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 24 },
+  profileModalCard: { width: '100%', maxWidth: 380, backgroundColor: colors.navy900, borderRadius: 24, borderWidth: 1, borderColor: colors.border, paddingTop: 24, paddingBottom: 18, paddingHorizontal: 18, alignItems: 'center', position: 'relative', alignSelf: 'center' },
   profileModalClose: { position: 'absolute', top: 12, right: 12, width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
   profileModalName: { color: colors.white, fontSize: 24, fontWeight: '900', marginTop: 18 },
   profileModalMacro: { color: colors.blue, fontSize: 13, fontWeight: '800', marginTop: 6 },
