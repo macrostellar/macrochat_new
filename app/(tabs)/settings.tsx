@@ -20,11 +20,11 @@ const statusOptions = [
   { value: 'offline', label: 'Offline', color: '#9CB2CC' },
 ] as const;
 
-const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/privacy' | '/security/appearance' }[] = [
+const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string; route?: '/security/privacy' | '/security/appearance' | '/security/notifications' | '/security/storage' }[] = [
   { icon: 'shield-checkmark-outline', title: 'Privacy', detail: 'Typing activity, calls and identity protection', route: '/security/privacy' },
-  { icon: 'notifications-outline', title: 'Notifications', detail: 'Messages, groups and calls' },
+  { icon: 'notifications-outline', title: 'Notifications', detail: 'Messages, groups and calls', route: '/security/notifications' },
   { icon: 'color-palette-outline', title: 'Appearance', detail: 'Dark navy theme', route: '/security/appearance' },
-  { icon: 'server-outline', title: 'Data and storage', detail: 'Media quality and network usage' },
+  { icon: 'server-outline', title: 'Data and storage', detail: 'Media quality and network usage', route: '/security/storage' },
 ];
 
 export default function SettingsScreen() {
