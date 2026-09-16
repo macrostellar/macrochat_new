@@ -448,7 +448,10 @@ export default function ConversationScreen() {
   };
 
   const openAttachmentMenu = () => {
-    setAttachmentPanelOpen((current) => !current);
+    setAttachmentPanelOpen((current) => {
+      if (!current) setEmojiOpen(false);
+      return !current;
+    });
   };
 
   const stopVoiceNote = async () => {
@@ -949,7 +952,35 @@ export default function ConversationScreen() {
               <Text style={{ color: colors.navy950, fontSize: 10, fontWeight: '900' }}>{unreadMessageCount > 9 ? '9+' : unreadMessageCount}</Text>
             </View>
           )}
-          <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest message" style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border }} onPress={() => { list.current?.scrollToOffset({ offset: 0, animated: true }); setAwayFromBottom(false); }}><Ionicons name="arrow-down" size={23} color={colors.white} /></Pressable>
+          <Pressable 
+            accessibilityRole="button" 
+            accessibilityLabel="Scroll to latest message" 
+            hitSlop={12}
+            style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border }} 
+            onPress={() => { 
+              if (!list.current) {
+                console.warn('[ScrollButton] FlatList ref not available');
+                return;
+              }
+              
+              // Try scrollToOffset first (works on all platforms)
+              if (typeof list.current.scrollToOffset === 'function') {
+                list.current.scrollToOffset({ offset: 0, animated: true });
+                setAwayFromBottom(false);
+              } 
+              // Fallback to scrollToIndex for web
+              else if (typeof list.current.scrollToIndex === 'function' && messages.length > 0) {
+                list.current.scrollToIndex({ index: messages.length - 1, animated: true, viewPosition: 1 });
+                setAwayFromBottom(false);
+              }
+              // Last resort - scroll container directly if available (web)
+              else {
+                console.warn('[ScrollButton] No scroll method available', { methods: Object.keys(list.current || {}) });
+              }
+            }}
+          >
+            <Ionicons name="arrow-down" size={23} color={colors.white} />
+          </Pressable>
         </View>
       )}
       </View>
@@ -1258,7 +1289,7 @@ export default function ConversationScreen() {
               }
             } : undefined}
           />
-          <Pressable style={styles.emojiToggle} hitSlop={8} accessibilityLabel="Emoji" onPress={() => setEmojiOpen(false)}><Ionicons name="happy-outline" size={22} color={emojiOpen ? colors.neon : colors.muted} /></Pressable>
+          <Pressable style={styles.emojiToggle} hitSlop={8} accessibilityLabel="Emoji" onPress={() => setEmojiOpen((current) => { if (!current) setAttachmentPanelOpen(false); return !current; })}><Ionicons name="happy-outline" size={22} color={emojiOpen ? colors.neon : colors.muted} /></Pressable>
         </View>
         <Pressable style={[styles.send, recording && styles.sendRecording]} onPress={onPrimaryAction}><Ionicons name={text.trim() ? 'send' : (recording ? 'stop' : 'mic')} size={21} color={colors.navy950} /></Pressable>
       </View>

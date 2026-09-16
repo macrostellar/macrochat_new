@@ -106,3 +106,18 @@ test('stored ciphertext and nonce round-trip with a reloaded session secret', ()
     assert.equal(crypto.decryptMessageWithSharedSecret(result.encrypted.ciphertext, result.encrypted.nonce, encodeBase64(nacl.randomBytes(32))), null);
   }
 });
+
+test('busy and away presence values stay visible as user status labels', () => {
+  const activity = loadModule('src/lib/useChatActivity.ts', {
+    react: { useCallback: () => {}, useEffect: () => {}, useRef: () => ({ current: null }), useState: (initial) => [initial, () => {}] },
+    'react-native': { AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) }, Platform: { OS: 'web' } },
+    './supabase': { supabase: null },
+  });
+
+  assert.equal(activity.normalizePresenceStatus('busy'), 'busy');
+  assert.equal(activity.normalizePresenceStatus('away'), 'away');
+  assert.equal(activity.normalizePresenceStatus('offline'), 'offline');
+  assert.equal(activity.presenceLabelForDisplay('busy'), 'Busy');
+  assert.equal(activity.presenceLabelForDisplay('away'), 'Away');
+  assert.equal(activity.presenceLabelForDisplay('online'), 'Online');
+});

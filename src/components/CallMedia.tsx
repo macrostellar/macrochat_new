@@ -16,25 +16,31 @@ export function CallMedia({ localStream, remoteStream, video }: Props) {
   useEffect(() => {
     if (Platform.OS !== 'web' || !remoteRef.current) return;
     const el = remoteRef.current as HTMLAudioElement | HTMLVideoElement;
+    console.log('[CallMedia] Attaching remote stream:', { hasStream: !!remoteStream, tracks: remoteStream?.getTracks().length || 0, tagName: el.tagName });
     el.srcObject = remoteStream as any;
     el.autoplay = true;
     if ('playsInline' in el) el.playsInline = true;
-    if (remoteStream) {
-      console.log('[CallMedia] Remote stream attached, size:', remoteStream.getTracks().length);
+    if (remoteStream && remoteStream.getTracks().length > 0) {
+      console.log('[CallMedia] Remote stream attached, calling play()');
       void el.play().catch((error: any) => console.warn('Remote media play failed:', error?.message || error));
+    } else {
+      console.warn('[CallMedia] Remote stream missing or has no tracks!', { hasStream: !!remoteStream, tracks: remoteStream?.getTracks().length });
     }
   }, [remoteStream]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !localRef.current) return;
     const el = localRef.current as HTMLVideoElement;
+    console.log('[CallMedia] Attaching local stream:', { hasStream: !!localStream, tracks: localStream?.getTracks().length || 0 });
     el.srcObject = localStream as any;
     el.autoplay = true;
     el.muted = true;
     el.playsInline = true;
-    if (localStream) {
-      console.log('[CallMedia] Local stream attached, size:', localStream.getTracks().length);
+    if (localStream && localStream.getTracks().length > 0) {
+      console.log('[CallMedia] Local stream attached, calling play()');
       void el.play().catch((error: any) => console.warn('Local video play failed:', error?.message || error));
+    } else {
+      console.warn('[CallMedia] Local stream missing or has no tracks!', { hasStream: !!localStream, tracks: localStream?.getTracks().length });
     }
   }, [localStream]);
 

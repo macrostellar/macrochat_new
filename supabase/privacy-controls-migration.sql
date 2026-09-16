@@ -34,6 +34,9 @@ create table if not exists public.macrochat_user_privacy (
 alter table public.macrochat_user_privacy
   add column if not exists show_device_status boolean not null default true;
 
+alter table public.macrochat_profiles
+  add column if not exists status text not null default 'online' check (status in ('online', 'busy', 'away', 'offline'));
+
 create table if not exists public.macrochat_blocked_users (
   blocker_id uuid not null references public.macrochat_profiles(id) on delete cascade,
   blocked_id uuid not null references public.macrochat_profiles(id) on delete cascade,
@@ -214,6 +217,10 @@ grant execute on function public.macrochat_list_blocked_users() to authenticated
 grant execute on function public.macrochat_set_disappearing_timer(integer) to authenticated;
 revoke all on function public.macrochat_cleanup_expired_messages() from public, anon, authenticated;
 grant execute on function public.macrochat_cleanup_expired_messages() to service_role;
+
+do $$ begin
+  alter publication supabase_realtime add table public.macrochat_user_privacy;
+exception when duplicate_object then null; end $$;
 
 do $$ begin
   alter publication supabase_realtime add table public.macrochat_blocked_users;

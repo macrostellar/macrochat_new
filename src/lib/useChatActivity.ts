@@ -8,30 +8,74 @@ export type ChatActivityState = 'typing' | 'recording' | 'screenshot';
 type Presence = { device?: DeviceKind; onlineAt: string; status: ProfileStatus };
 type Channel = ReturnType<NonNullable<typeof supabase>['channel']>;
 
+export function normalizePresenceStatus(value: unknown): ProfileStatus {
+  return value === 'busy' || value === 'away' || value === 'offline' || value === 'online'
+    ? value
+    : 'online';
+}
+
+export function presenceLabelForDisplay(status: ProfileStatus | undefined): string {
+  if (status === 'busy') return 'Busy';
+  if (status === 'away') return 'Away';
+  if (status === 'offline') return 'Offline';
+  return 'Online';
+}
+
 export function useChatActivity(chats: Chat[], profile: Profile | null, showDevice: boolean, device: DeviceKind | null, shareTyping: boolean) {
   const [activityByChat, setActivityByChat] = useState<Record<string, { state: ChatActivityState; userId: string }>>({});
   const [presenceByUser, setPresenceByUser] = useState<Record<string, Presence>>({});
   const channels = useRef(new Map<string, Channel>());
   const userId = profile?.id;
   const profileStatus = profile?.status;
-  const routes = JSON.stringify(chats.filter((chat) => chat.participantUserId).map((chat) => [chat.id, chat.participantUserId!]).sort());
+  
+  // Stable routes ref: only update when chat IDs or participant IDs actually change
+  const routesRef = useRef<[string, string][]>([]);
+  const routesKey = useRef<string>('');
+  const currentRoutesKey = chats
+    .filter((chat) => chat.participantUserId)
+    .map((chat) => `${chat.id}:${chat.participantUserId}`)
+    .sort()
+    .join('|');
+  
+  if (currentRoutesKey !== routesKey.current) {
+    routesKey.current = currentRoutesKey;
+    routesRef.current = chats.filter((chat) => chat.participantUserId).map((chat) => [chat.id, chat.participantUserId!]);
+  }
+
+  // Held in a ref so status/device edits re-track on live channels instead of recreating them.
+  const payloadRef = useRef({ showDevice, device, status: profileStatus });
+  payloadRef.current = { showDevice, device, status: profileStatus };
+
+  const publish = useCallback((channel: Channel) => {
+    if (String(channel.state) !== 'joined') return;
+    if (AppState.currentState !== 'active' && Platform.OS !== 'web') return channel.untrack();
+    if (Platform.OS === 'web' && document.hidden) return;
+    const { showDevice: shareDevice, status } = payloadRef.current;
+    // Web platform ALWAYS uses 'web' device type regardless of mobile/desktop setting
+    const finalDevice = shareDevice ? 'web' : undefined;
+    console.log('[Publish Presence] Web', { finalDevice, status: normalizePresenceStatus(status) });
+    return channel.track({
+      device: finalDevice,
+      onlineAt: new Date().toISOString(),
+      status: normalizePresenceStatus(status),
+    });
+  }, []);
+
+  useEffect(() => {
+    channels.current.forEach((channel) => { void publish(channel); });
+  }, [publish, profileStatus, showDevice, device]);
 
   useEffect(() => {
     if (!supabase || !userId) return;
     const client = supabase;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
-    const peersByChat = new Map<string, Record<string, Presence>>();
     let disposed = false;
-    const publish = (channel: Channel) => {
-      if (AppState.currentState !== 'active' && Platform.OS !== 'web') return channel.untrack();
-      if (Platform.OS === 'web' && document.hidden) return channel.untrack();
-      return channel.track({
-        device: showDevice ? device ?? (Platform.OS === 'web' ? 'web' : 'mobile') : null,
-        onlineAt: new Date().toISOString(),
-        status: profileStatus ?? 'online',
-      });
-    };
-    for (const [chatId, peerId] of JSON.parse(routes) as [string, string][]) {
+    const peerIds = new Set(routesRef.current.map(([, peerId]) => peerId));
+    setPresenceByUser((current) => {
+      const kept = Object.entries(current).filter(([id]) => peerIds.has(id));
+      return kept.length === Object.keys(current).length ? current : Object.fromEntries(kept);
+    });
+    for (const [chatId, peerId] of routesRef.current) {
       const channel = client.channel(`macrochat-conversation-${chatId}`, { config: { presence: { key: userId } } });
       channels.current.set(chatId, channel);
       channel.on('broadcast', { event: 'chat-activity' }, ({ payload }) => {
@@ -44,21 +88,52 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
         });
         if (!['typing', 'recording', 'screenshot'].includes(payload.state)) return clear();
         setActivityByChat((current) => ({ ...current, [chatId]: { state: payload.state, userId: peerId } }));
-        timers.set(chatId, setTimeout(clear, 1800));
+        // Clear typing faster for responsive feel (600ms instead of 1800ms)
+        timers.set(chatId, setTimeout(clear, 600));
       }).on('presence', { event: 'sync' }, () => {
         if (disposed) return;
         const entries = channel.presenceState<Presence>()[peerId] ?? [];
         const entry = [...entries].sort((first, second) => second.onlineAt.localeCompare(first.onlineAt))[0];
-        const peer: Record<string, Presence> = {};
-        if (entry) peer[peerId] = {
-          onlineAt: entry.onlineAt,
-          status: ['online', 'busy', 'away', 'offline'].includes(entry.status) ? entry.status : 'online',
-          device: entry.status !== 'offline' && ['mobile', 'desktop', 'web'].includes(entry.device ?? '') ? entry.device : undefined,
-        };
-        peersByChat.set(chatId, peer);
-        setPresenceByUser(Object.assign({}, ...peersByChat.values()));
+        console.log(`[Presence Sync] Chat ${chatId}: peer ${peerId.slice(0, 8)}...`, { entry, isOnline: !!entry });
+        // Only update if we have presence data - don't delete on transient sync events
+        if (!entry) return;
+        
+        setPresenceByUser((current) => {
+          const normalizedStatus = normalizePresenceStatus(entry.status);
+          const normalizedDevice = entry.device && ['mobile', 'desktop', 'web'].includes(entry.device) ? entry.device : undefined;
+          return {
+            ...current,
+            [peerId]: {
+              onlineAt: entry.onlineAt,
+              status: normalizedStatus,
+              device: normalizedStatus !== 'offline' ? normalizedDevice : undefined,
+            },
+          };
+        });
+      }).on('presence', { event: 'leave' }, () => {
+        if (disposed) return;
+        console.log(`[Presence Leave] Chat ${chatId}: peer ${peerId.slice(0, 8)}... left`);
+        // Only delete on explicit leave events, not transient syncs
+        setPresenceByUser((current) => {
+          if (!(peerId in current)) return current;
+          const next = { ...current };
+          delete next[peerId];
+          return next;
+        });
       }).subscribe((status) => {
-        if (status === 'SUBSCRIBED' && !disposed) void publish(channel);
+        if (disposed) return;
+        console.log(`[Channel Subscribe] Chat ${chatId}: status=${status}`);
+        if (status === 'SUBSCRIBED') {
+          void publish(channel);
+          // Force initial sync after subscribe
+          setTimeout(() => {
+            const entries = channel.presenceState<Presence>()[peerId] ?? [];
+            const entry = [...entries].sort((first, second) => second.onlineAt.localeCompare(first.onlineAt))[0];
+            if (entry) {
+              console.log(`[Presence Initial] Chat ${chatId}: loaded entry for ${peerId.slice(0, 8)}...`, entry);
+            }
+          }, 100);
+        }
       });
     }
     const publishAll = () => channels.current.forEach((channel) => { void publish(channel); });
@@ -73,13 +148,20 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
       activeChannels.forEach((channel) => { void client.removeChannel(channel); });
       activeChannels.clear();
       setActivityByChat({});
-      setPresenceByUser({});
     };
-  }, [routes, userId, profileStatus, showDevice, device]);
+  }, [currentRoutesKey, userId, publish]);
+
+  useEffect(() => {
+    if (userId) return;
+    setPresenceByUser({});
+    setActivityByChat({});
+  }, [userId]);
 
   const sendChatActivity = useCallback((chatId: string, state: ChatActivityState | null) => {
     if (!profile || (state && !shareTyping)) return;
-    void channels.current.get(chatId)?.send({ type: 'broadcast', event: 'chat-activity', payload: { userId: profile.id, state } });
+    const channel = channels.current.get(chatId);
+    if (!channel || String(channel.state) !== 'joined') return;
+    void channel.send({ type: 'broadcast', event: 'chat-activity', payload: { userId: profile.id, state } });
   }, [profile, shareTyping]);
 
   return { activityByChat, presenceByUser, sendChatActivity };

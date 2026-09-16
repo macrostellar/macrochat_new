@@ -519,9 +519,29 @@ export function AppProvider({ children }: PropsWithChildren) {
 
     const { data, error } = await supabase
       .from('macrochat_profiles')
-      .select('id,macro_id,display_name,avatar_color,avatar_url')
+      .select('id,macro_id,display_name,avatar_color,avatar_url,status')
       .eq('id', userId)
       .maybeSingle();
+    
+    if (error && error.message?.includes('status')) {
+      const { data: fallback, error: fallbackError } = await supabase
+        .from('macrochat_profiles')
+        .select('id,macro_id,display_name,avatar_color,avatar_url')
+        .eq('id', userId)
+        .maybeSingle();
+      if (fallbackError || !fallback) throw toReadableDbError('Restoring account profile failed', fallbackError || error);
+      const restored: Profile = {
+        id: fallback.id,
+        macroId: fallback.macro_id,
+        displayName: fallback.display_name,
+        avatarColor: fallback.avatar_color,
+        avatarUrl: (fallback as { avatar_url?: string | null }).avatar_url ?? undefined,
+        status: 'online',
+      };
+      await writeProfileToStorage(restored);
+      setProfile(restored);
+      return restored;
+    }
     if (error) throw toReadableDbError('Restoring account profile failed', error);
     if (!data) return null;
 
@@ -1437,6 +1457,41 @@ export function AppProvider({ children }: PropsWithChildren) {
     refreshPrivacyState().catch((error) => console.warn('Failed to refresh privacy settings', error));
   }, [refreshPrivacyState]);
 
+  // Real-time subscription to privacy setting changes
+  useEffect(() => {
+    if (!supabase || !profile?.id) {
+      console.log('[Privacy] Not subscribing - supabase available:', !!supabase, 'profile.id:', profile?.id);
+      return;
+    }
+    console.log('[Privacy] Subscribing to privacy setting changes for user:', profile.id);
+    
+    const channel = supabase
+      .channel(`private.macrochat_user_privacy:user_id=eq.${profile.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'macrochat_user_privacy',
+          filter: `user_id=eq.${profile.id}`,
+        },
+        async (payload: any) => {
+          console.log('[Privacy] Privacy settings updated via Realtime:', payload);
+          await refreshPrivacyState();
+        }
+      )
+      .subscribe((status) => {
+        console.log('[Privacy] Subscription status:', status);
+      });
+
+    return () => {
+      console.log('[Privacy] Cleaning up subscription for user:', profile.id);
+      if (supabase) {
+        void supabase.removeChannel(channel);
+      }
+    };
+  }, [profile?.id, refreshPrivacyState]);
+
   // Request notification permission on app start
   useEffect(() => {
     if (!profile) return;
@@ -1634,13 +1689,23 @@ export function AppProvider({ children }: PropsWithChildren) {
     return pc;
   }, []);
 
-  const attachLocalMedia = useCallback(async (pc: RTCPeerConnection, video: boolean) => {
+  const acquireLocalMedia = useCallback(async (video: boolean) => {
+    const existing = localCallStreamRef.current;
+    if (existing && (!video || existing.getVideoTracks().length > 0)) return existing;
     const { getUserMedia } = getWebRTC();
     const stream = await getUserMedia({ audio: true, video });
     localCallStreamRef.current = stream;
     setLocalCallStream(stream);
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    return stream;
   }, []);
+
+  const attachLocalMedia = useCallback(async (pc: RTCPeerConnection, video: boolean) => {
+    const stream = await acquireLocalMedia(video);
+    const attached = new Set(pc.getSenders().map((sender) => sender.track).filter(Boolean));
+    stream.getTracks().forEach((track) => {
+      if (!attached.has(track)) pc.addTrack(track, stream);
+    });
+  }, [acquireLocalMedia]);
 
   const flushPendingIce = useCallback(async (pc: RTCPeerConnection) => {
     const queued = pendingIceRef.current;
@@ -1964,7 +2029,21 @@ export function AppProvider({ children }: PropsWithChildren) {
     const nextProfile: Profile = { ...profile, status };
     setProfile(nextProfile);
     await writeProfileToStorage(nextProfile);
-  }, [profile]);
+
+    if (supabase) {
+      const { error } = await supabase.from('macrochat_profiles').upsert({
+        id: profile.id,
+        macro_id: profile.macroId,
+        display_name: profile.displayName,
+        avatar_color: profile.avatarColor,
+        avatar_url: profile.avatarUrl ?? null,
+        status,
+      }, { onConflict: 'id' });
+      if (error) {
+        console.warn('Failed to sync profile status', error.message || error);
+      }
+    }
+  }, [profile, supabase]);
 
   const updateProfileDisplayName = useCallback(async (displayName: string) => {
     if (!profile) return;
@@ -2012,6 +2091,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         display_name: next.displayName,
         avatar_color: next.avatarColor,
         avatar_url: next.avatarUrl ?? null,
+        status: next.status,
       });
       if (error) throw error;
     }
@@ -2022,6 +2102,9 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, []);
 
   const signOut = useCallback(async () => {
+    console.log('[SignOut] Starting complete sign-out...');
+    
+    // Clear app state first
     await clearProfileFromStorage();
     await clearE2EEPassphrase();
     disconnectCallSignaling();
@@ -2034,11 +2117,52 @@ export function AppProvider({ children }: PropsWithChildren) {
     e2eeProUserIdRef.current = null;
     setChats(isSupabaseConfigured ? [] : demoChats);
 
+    // Sign out from Supabase
     try {
+      console.log('[SignOut] Calling Supabase auth.signOut()...');
       await supabase?.auth.signOut({ scope: 'local' });
+      console.log('[SignOut] Supabase session cleared');
     } catch (error) {
-      console.warn('Remote session cleanup failed after local sign-out', error);
+      console.warn('[SignOut] Auth signOut failed:', error);
     }
+
+    // Clear ALL browser storage on web to ensure clean slate
+    if (Platform.OS === 'web') {
+      console.log('[SignOut] Clearing browser storage...');
+      
+      // Clear localStorage
+      if (typeof localStorage !== 'undefined') {
+        localStorage.clear();
+      }
+      
+      // Clear sessionStorage
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.clear();
+      }
+      
+      // Clear IndexedDB (where Supabase auth can store data)
+      try {
+        const dbs = await indexedDB.databases?.();
+        if (dbs?.length) {
+          dbs.forEach((dbInfo) => {
+            if (dbInfo.name) {
+              console.log('[SignOut] Deleting IndexedDB:', dbInfo.name);
+              indexedDB.deleteDatabase(dbInfo.name);
+            }
+          });
+        }
+      } catch (e) {
+        console.log('[SignOut] IndexedDB cleanup skipped:', e);
+      }
+      
+      console.log('[SignOut] Storage cleared - reloading page for clean login');
+      // Force a hard reload to ensure fresh state and clean login
+      setTimeout(() => {
+        window.location.href = '/';
+      }, 100);
+    }
+    
+    console.log('[SignOut] Complete - awaiting page reload');
   }, []);
 
   const enableE2EE = useCallback(async (passphrase: string) => {
@@ -2661,6 +2785,13 @@ export function AppProvider({ children }: PropsWithChildren) {
     const socket = getCallSocket();
     if (!socket?.connected) throw new Error('Call signaling is not connected yet.');
 
+    // Show the local preview while dialing instead of waiting for the callee to accept.
+    try {
+      await acquireLocalMedia(video);
+    } catch {
+      throw new Error(video ? 'Camera and microphone access is required for video calls.' : 'Microphone access is required for calls.');
+    }
+
     const callId = localId('call');
     socket.emit('call:invite', {
       callId,
@@ -2677,7 +2808,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       video,
       status: 'dialing',
     });
-  }, [blockedContacts, chats, profile, signalingEnabled]);
+  }, [acquireLocalMedia, blockedContacts, chats, profile, signalingEnabled]);
 
   const startAudioCall = useCallback((chatId: string) => startCall(chatId, false), [startCall]);
   const startVideoCall = useCallback((chatId: string) => startCall(chatId, true), [startCall]);
@@ -2686,9 +2817,10 @@ export function AppProvider({ children }: PropsWithChildren) {
     const socket = getCallSocket();
     if (!socket || !activeCall || !activeCall.incoming) return;
     void stopCallAlert();
+    void acquireLocalMedia(activeCall.video).catch((error) => console.warn('Failed to open local media', error));
     socket.emit('call:accept', { callId: activeCall.callId, toUserId: activeCall.peerUserId });
     setActiveCall((current) => (current ? { ...current, status: 'connected' } : current));
-  }, [activeCall]);
+  }, [acquireLocalMedia, activeCall]);
 
   const rejectIncomingCall = useCallback(() => {
     const socket = getCallSocket();
@@ -2715,7 +2847,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     const presence = chat.participantUserId ? presenceByUser[chat.participantUserId] : undefined;
     const status = presence?.status ?? (chat.online ? 'online' : 'offline');
     if (!presence) return { ...chat, status, peerDevice: undefined, online: status !== 'offline' };
-    return { ...chat, status, online: status !== 'offline', peerDevice: presence.device, lastSeen: status };
+    return { ...chat, status, online: status !== 'offline', peerDevice: presence.device };
   }), [chats, presenceByUser]);
 
   const value = useMemo(() => ({

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, Dimensions, FlatList, Image, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { router } from 'expo-router';
@@ -7,10 +7,10 @@ import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { Avatar } from '@/components/Avatar';
-import { AmbientQuantumField } from '@/components/AmbientQuantumField';
 import { MessageTimerBorder } from '@/components/MessageTimerBorder';
 import { VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
 import { useApp } from '@/context/AppContext';
+import { presenceLabelForDisplay } from '@/lib/useChatActivity';
 import { STICKER_LIST } from '@/lib/stickers';
 import { colors } from '@/theme/colors';
 import type { Chat, Message } from '@/types';
@@ -217,8 +217,26 @@ function VoiceNoteBubble({ item }: { item: Message }) {
   );
 }
 
+function extractDragFiles(event: any): File[] {
+  const transfer = event?.dataTransfer;
+  const fromFiles = Array.from((transfer?.files ?? []) as File[]).filter(Boolean);
+  console.log('[extractDragFiles] FromFiles:', fromFiles.length);
+  if (fromFiles.length) return fromFiles as File[];
+
+  const fromItems = Array.from((transfer?.items ?? []) as DataTransferItem[]).filter(Boolean);
+  console.log('[extractDragFiles] FromItems:', fromItems.length);
+  const itemFiles: File[] = [];
+  for (const item of fromItems) {
+    const file = typeof item?.getAsFile === 'function' ? item.getAsFile() : null;
+    if (file) itemFiles.push(file);
+  }
+  console.log('[extractDragFiles] Final files:', itemFiles.length);
+  return itemFiles;
+}
+
 function Conversation({ chat }: { chat: Chat }) {
   const [windowWidth, setWindowWidth] = useState(() => Dimensions.get('window').width);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const isMobile = windowWidth < 820;
 
   useEffect(() => {
@@ -228,6 +246,67 @@ function Conversation({ chat }: { chat: Chat }) {
     const subscription = Dimensions.addEventListener('change', handleResize);
     return () => subscription?.remove();
   }, []);
+
+  // Attach native DOM drag listeners for web (fallback for React Native View drag handlers)
+  useEffect(() => {
+    if (!conversationRef.current || typeof window === 'undefined') return;
+    
+    const el = conversationRef.current as any;
+    const domElement = el._internalFiberInstanceHandleDEV?.return?.stateNode || el;
+    
+    if (!domElement) {
+      console.log('[Drag] conversationRef DOM element not accessible');
+      return;
+    }
+
+    const handleDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+        e.dataTransfer.effectAllowed = 'copy';
+      }
+      console.log('[Drag Web] dragenter fired, hasFiles:', e.dataTransfer?.types?.includes('Files'));
+      setIsDraggingOver(true);
+    };
+
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+        e.dataTransfer.effectAllowed = 'copy';
+      }
+      console.log('[Drag Web] dragover fired');
+    };
+
+    const handleDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log('[Drag Web] dragleave fired');
+      setIsDraggingOver(false);
+    };
+
+    const handleDrop = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log('[Drag Web] drop fired, files:', e.dataTransfer?.files?.length ?? 0);
+      void handleDroppedFiles(e as any);
+    };
+
+    domElement.addEventListener('dragenter', handleDragEnter, true);
+    domElement.addEventListener('dragover', handleDragOver, true);
+    domElement.addEventListener('dragleave', handleDragLeave, true);
+    domElement.addEventListener('drop', handleDrop, true);
+
+    return () => {
+      domElement.removeEventListener('dragenter', handleDragEnter, true);
+      domElement.removeEventListener('dragover', handleDragOver, true);
+      domElement.removeEventListener('dragleave', handleDragLeave, true);
+      domElement.removeEventListener('drop', handleDrop, true);
+    };
+  }, []);
+
   const {
     chats,
     activityByChat,
@@ -257,6 +336,7 @@ function Conversation({ chat }: { chat: Chat }) {
   const [fontStyle, setFontStyle] = useState<'normal' | 'italic'>('normal');
   const [fontFamily, setFontFamily] = useState<string>(FONT_FAMILIES[0].value);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const emojiAnimRef = useRef(new Animated.Value(0));
   const [showFormatPanel, setShowFormatPanel] = useState(false);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [showTopMenu, setShowTopMenu] = useState(false);
@@ -368,6 +448,14 @@ function Conversation({ chat }: { chat: Chat }) {
   }, [messageSearchAnim, showMessageSearch]);
 
   useEffect(() => {
+    Animated.timing(emojiAnimRef.current, {
+      toValue: showEmojiPicker ? 1 : 0,
+      duration: 280,
+      useNativeDriver: true,
+    }).start();
+  }, [showEmojiPicker]);
+
+  useEffect(() => {
     setSearchMatchIndex(0);
   }, [messageSearchQuery, chat.id]);
 
@@ -423,7 +511,8 @@ function Conversation({ chat }: { chat: Chat }) {
       return;
     }
     sendChatActivity(chat.id, 'typing');
-    const timeout = setTimeout(() => sendChatActivity(chat.id, null), 1500);
+    // Keep typing indicator active while user is typing, clear quickly when they stop
+    const timeout = setTimeout(() => sendChatActivity(chat.id, null), 800);
     return () => clearTimeout(timeout);
   }, [chat.id, manualActivityState, sendChatActivity, text]);
 
@@ -569,10 +658,15 @@ function Conversation({ chat }: { chat: Chat }) {
     }
   };
 
-  const handleDroppedFiles = async (event: any) => {
+  const handleDroppedFiles = useCallback(async (event: any) => {
     event?.preventDefault?.();
-    const files = Array.from((event?.dataTransfer?.files ?? []) as File[]);
-    if (!files.length) return;
+    event?.stopPropagation?.();
+    const files = extractDragFiles(event);
+    console.log('[Drop] Files received:', files.length);
+    if (!files.length) {
+      setIsDraggingOver(false);
+      return;
+    }
 
     for (const file of files) {
       if (!file) continue;
@@ -582,6 +676,7 @@ function Conversation({ chat }: { chat: Chat }) {
       if (!isImage && !isVideo) continue;
 
       const uri = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(resolvedFile as Blob) : resolvedFile.name;
+      console.log('[Drop] Sending media:', { kind: isVideo ? 'video' : 'image', name: resolvedFile.name });
       await sendMediaMessage(chat.id, {
         kind: isVideo ? 'video' : 'image',
         uri,
@@ -590,7 +685,20 @@ function Conversation({ chat }: { chat: Chat }) {
       });
     }
 
+    setIsDraggingOver(false);
     requestAnimationFrame(() => list.current?.scrollToOffset({ offset: 0, animated: false }));
+  }, [chat.id, sendMediaMessage]);
+
+  const handleDragState = (event: any, active: boolean) => {
+    if (!event) return;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = active ? 'copy' : 'none';
+      event.dataTransfer.effectAllowed = 'copy';
+    }
+    console.log(`[Drag] ${active ? 'ENTER/OVER' : 'LEAVE'}`, { hasFiles: event.dataTransfer?.types?.includes('Files') });
+    setIsDraggingOver(active);
   };
 
   const handleDownloadMedia = async () => {
@@ -739,10 +847,12 @@ function Conversation({ chat }: { chat: Chat }) {
       ref={conversationRef}
       style={[styles.conversation, { backgroundColor: wall.page }]}
       {...({
-        onDragOver: (event: any) => {
-          event.preventDefault?.();
-          if (event?.dataTransfer) {
-            event.dataTransfer.dropEffect = 'copy';
+        onDragEnter: (event: any) => handleDragState(event, true),
+        onDragOver: (event: any) => handleDragState(event, true),
+        onDragLeave: (event: any) => {
+          const relatedTarget = event?.relatedTarget ?? event?.target;
+          if (relatedTarget && event.currentTarget && relatedTarget !== event.currentTarget && !event.currentTarget.contains?.(relatedTarget)) {
+            setIsDraggingOver(false);
           }
         },
         onDrop: (event: any) => {
@@ -750,11 +860,16 @@ function Conversation({ chat }: { chat: Chat }) {
         },
       } as any)}
     >
-      <AmbientQuantumField />
-
-      {(showTopMenu || showAttachmentMenu || showEmojiPicker || showFormatPanel || activeMessageMenu) && (
-        <Pressable style={styles.dismissOverlay} onPress={closeAllPanels} />
+      {isDraggingOver && (
+        <View pointerEvents="none" style={styles.dragDropOverlay}>
+          <View style={styles.dragDropBadge}>
+            <Ionicons name="cloud-upload-outline" size={18} color={colors.white} />
+            <Text style={styles.dragDropText}>Drop image to send</Text>
+          </View>
+        </View>
       )}
+      {/* Simple background instead of heavy WebGL animation for better performance */}
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: wall.page }]} pointerEvents="none" />
 
       {/* HEADER - MOBILE BACK BUTTON */}
       {isMobile && (
@@ -783,7 +898,7 @@ function Conversation({ chat }: { chat: Chat }) {
                     : colors.neon;
 
               return chat.online ? (
-                <Text style={[styles.presence, { color: statusColor }]}>{chat.lastSeen}</Text>
+                <Text style={[styles.presence, { color: statusColor }]}>{presenceLabelForDisplay(chat.status)}</Text>
               ) : (
                 <Text style={[styles.presence, { color: '#9CB2CC' }]}>{chat.lastSeen}</Text>
               );
@@ -864,7 +979,7 @@ function Conversation({ chat }: { chat: Chat }) {
               return chat.online ? (
                 <View style={styles.presenceRow}>
                   <View style={[styles.presenceDot, { backgroundColor: statusColor }]} />
-                  <Text style={[styles.presence, { color: statusColor }]}>{chat.lastSeen}</Text>
+                  <Text style={[styles.presence, { color: statusColor }]}>{presenceLabelForDisplay(chat.status)}</Text>
                 </View>
               ) : (
                 <Text style={[styles.presence, { color: '#9CB2CC' }]}>{chat.lastSeen}</Text>
@@ -1012,12 +1127,13 @@ function Conversation({ chat }: { chat: Chat }) {
         data={filteredMessages}
         inverted
         ListHeaderComponent={pinnedHeader}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item) => item.clientId ?? item.id}
         style={styles.messageList}
         contentContainerStyle={styles.messageContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
+        getItemLayout={(_, index) => ({ length: 96, offset: index * 96, index })}
         onScroll={(event) => setAwayFromBottom(event.nativeEvent.contentOffset.y > 160)}
         renderItem={({ item, index }) => {
           if (item.kind === 'call') {
@@ -1273,7 +1389,7 @@ function Conversation({ chat }: { chat: Chat }) {
 
       {/* EMOJI PICKER POPUP */}
       {showEmojiPicker && (
-        <View style={[styles.emojiGrid, isMobile && styles.mobileEmojiGrid]}>
+        <Animated.View style={[styles.emojiGrid, isMobile && styles.mobileEmojiGrid, { opacity: emojiAnimRef.current, transform: [{ translateY: emojiAnimRef.current.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }] }]}>
           <View style={styles.pickerSectionHeader}>
             <Text style={styles.pickerSectionTitle}>Emoji</Text>
           </View>
@@ -1305,7 +1421,7 @@ function Conversation({ chat }: { chat: Chat }) {
               </Pressable>
             ))}
           </View>
-        </View>
+        </Animated.View>
       )}
 
       {/* ATTACHMENT POPUP */}
@@ -1380,19 +1496,29 @@ function Conversation({ chat }: { chat: Chat }) {
       <View style={[styles.composer, { backgroundColor: wall.panel }]}>
         <Pressable
           accessibilityLabel="Attach media"
+          hitSlop={8}
           style={styles.composeAction}
-          onPress={() => setShowAttachmentMenu(!showAttachmentMenu)}
+          onPress={() => {
+            setShowAttachmentMenu(!showAttachmentMenu);
+            if (!showAttachmentMenu) setShowEmojiPicker(false); // Close emoji when opening attachment
+          }}
         >
           <Ionicons name="add" size={26} color={showAttachmentMenu ? colors.neon : colors.blue} />
         </Pressable>
 
         <View style={styles.optionsContainer}>
           <View style={styles.inputShell}>
-            <Pressable onPress={() => setShowEmojiPicker(false)} style={{ paddingRight: 6 }}>
+            <Pressable 
+              onPress={() => {
+                setShowEmojiPicker(!showEmojiPicker);
+                if (!showEmojiPicker) setShowAttachmentMenu(false);
+              }} 
+              hitSlop={8}
+              style={{ paddingRight: 6 }}>
               <Ionicons name="happy-outline" size={21} color={showEmojiPicker ? colors.neon : colors.blue} />
             </Pressable>
 
-            <Pressable onPress={() => setShowFormatPanel(!showFormatPanel)} style={{ paddingRight: 6 }}>
+            <Pressable onPress={() => setShowFormatPanel(!showFormatPanel)} hitSlop={8} style={{ paddingRight: 6 }}>
               <Ionicons name="text-outline" size={20} color={showFormatPanel ? colors.neon : colors.muted} />
             </Pressable>
 
@@ -1463,6 +1589,11 @@ function Conversation({ chat }: { chat: Chat }) {
           </View>
         </>
       )}
+
+      {/* DISMISS OVERLAY - Rendered last, pointerEvents: none lets clicks pass through to buttons */}
+      {(showTopMenu || showAttachmentMenu || showEmojiPicker || showFormatPanel || activeMessageMenu) && (
+        <Pressable style={styles.dismissOverlay} onPress={closeAllPanels} />
+      )}
     </View>
   );
 }
@@ -1496,7 +1627,7 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
       .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
   }, [chats, filter, query]);
 
-  const selected = chats.find((chat) => chat.id === selectedId) ?? chats[0];
+  const selected = chats.find((chat) => chat.id === selectedId) ?? chats[0] ?? null;
 
   useEffect(() => {
     if (!selectedId && chats[0]) setSelectedId(chats[0].id);
@@ -1506,9 +1637,30 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
     if (initialChatId) setSelectedId(initialChatId);
   }, [initialChatId]);
 
-  return isMobileView && selected ? (
-    <Conversation chat={selected} />
-  ) : (
+  useEffect(() => {
+    if (selectedId && !chats.some((chat) => chat.id === selectedId) && chats[0]) {
+      setSelectedId(chats[0].id);
+    }
+  }, [chats, selectedId]);
+
+  if (isMobileView) {
+    // New accounts have no chats yet, so keep a usable empty state instead of a blank screen.
+    return selected ? (
+      <Conversation chat={selected} />
+    ) : (
+      <View style={[styles.desktop, styles.desktopEmpty]}>
+        <View style={styles.blankIcon}><Ionicons name="chatbubbles-outline" size={43} color={colors.blue} /></View>
+        <Text style={styles.blankTitle}>MacroChat</Text>
+        <Text style={styles.blankText}>Start a private chat to begin messaging.</Text>
+        <Pressable style={styles.blankAction} onPress={() => router.push('/new-chat')}>
+          <Ionicons name="create-outline" size={18} color={colors.navy950} />
+          <Text style={styles.blankActionText}>New chat</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  return (
     <View style={styles.desktop}>
       {activeContextMenu && <Pressable style={styles.sidebarDismissOverlay} onPress={() => setActiveContextMenu(null)} />}
       <View style={styles.rail}>
@@ -1660,13 +1812,26 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
         </View>
       </View>
 
-      {selected ? <Conversation chat={selected} /> : <View style={styles.blank}><View style={styles.blankIcon}><Ionicons name="chatbubbles-outline" size={43} color={colors.blue} /></View><Text style={styles.blankTitle}>MacroChat Web</Text><Text style={styles.blankText}>Select a conversation or start a new private chat.</Text></View>}
+      {selected ? (
+        <Conversation chat={selected} />
+      ) : (
+        <View style={styles.blank}>
+          <View style={styles.blankIcon}><Ionicons name="chatbubbles-outline" size={43} color={colors.blue} /></View>
+          <Text style={styles.blankTitle}>MacroChat Web</Text>
+          <Text style={styles.blankText}>Select a conversation or start a new private chat.</Text>
+          <Pressable style={styles.blankAction} onPress={() => router.push('/new-chat')}>
+            <Ionicons name="create-outline" size={18} color={colors.navy950} />
+            <Text style={styles.blankActionText}>New chat</Text>
+          </Pressable>
+        </View>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   desktop: { position: 'relative', flex: 1, flexDirection: 'row', minWidth: 820, backgroundColor: '#010A12', overflow: 'hidden' },
+  desktopEmpty: { alignItems: 'center', justifyContent: 'center' },
   sidebarDismissOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 25, backgroundColor: 'transparent', pointerEvents: 'auto' },
   rail: { width: 68, backgroundColor: colors.black, borderRightWidth: 1, borderRightColor: colors.border, alignItems: 'center', paddingVertical: 14 },
   logo: { width: 38, height: 38, borderRadius: 8, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' },
@@ -1709,7 +1874,10 @@ const styles = StyleSheet.create({
   onlineDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.neon },
   identityText: { color: colors.muted, fontSize: 11, flex: 1 },
   conversation: { position: 'relative', flex: 1, minWidth: 0, backgroundColor: '#040D16', overflow: 'visible' },
-  dismissOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 10, backgroundColor: 'transparent', pointerEvents: 'auto' },
+  dragDropOverlay: { position: 'absolute', inset: 0, zIndex: 50, backgroundColor: 'rgba(3, 11, 18, 0.35)', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
+  dragDropBadge: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(14, 26, 38, 0.9)', borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.42)', borderRadius: 999, paddingHorizontal: 16, paddingVertical: 10 },
+  dragDropText: { color: colors.white, fontSize: 12, fontWeight: '800', letterSpacing: 0.4 },
+  dismissOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 10, backgroundColor: 'transparent', pointerEvents: 'none' },
   chatHeader: { position: 'relative', height: 68, backgroundColor: colors.navy900, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, zIndex: 20 },
   person: { flex: 1 },
   personName: { color: colors.white, fontWeight: '800', fontSize: 15 },
@@ -1792,6 +1960,8 @@ const styles = StyleSheet.create({
   blankIcon: { width: 78, height: 78, borderRadius: 39, backgroundColor: colors.navy800, alignItems: 'center', justifyContent: 'center' },
   blankTitle: { color: colors.white, fontSize: 24, fontWeight: '900', marginTop: 18 },
   blankText: { color: colors.muted, fontSize: 13, marginTop: 7 },
+  blankAction: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 18, paddingHorizontal: 18, paddingVertical: 11, borderRadius: 22, backgroundColor: colors.neon },
+  blankActionText: { color: colors.navy950, fontSize: 14, fontWeight: '800' },
   // CALL BUBBLE & CONTEXT MENU & FORMAT STYLES
   callMsgContainer: { alignSelf: 'center', marginVertical: 10, width: '100%', maxWidth: 360 },
   callMsgBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.navy800, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.border },

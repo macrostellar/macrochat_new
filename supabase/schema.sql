@@ -8,6 +8,7 @@ create table if not exists public.macrochat_profiles (
   display_name text not null check (char_length(display_name) between 2 and 32),
   avatar_color text not null default '#55B9FF',
   avatar_url text,
+  status text not null default 'online' check (status in ('online', 'busy', 'away', 'offline')),
   created_at timestamptz not null default now(),
   last_seen timestamptz not null default now()
 );
