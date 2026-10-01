@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import { supabase } from './supabase';
 import type { Chat, Profile, ProfileStatus } from '@/types';
 
@@ -53,7 +53,6 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
     const { showDevice: shareDevice, status } = payloadRef.current;
     // Web platform ALWAYS uses 'web' device type regardless of mobile/desktop setting
     const finalDevice = shareDevice ? 'web' : undefined;
-    console.log('[Publish Presence] Web', { finalDevice, status: normalizePresenceStatus(status) });
     return channel.track({
       device: finalDevice,
       onlineAt: new Date().toISOString(),
@@ -62,6 +61,7 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
   }, []);
 
   useEffect(() => {
+    // Publish to all channels on visibility/app state change without recreating channels
     channels.current.forEach((channel) => { void publish(channel); });
   }, [publish, profileStatus, showDevice, device]);
 
@@ -94,7 +94,6 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
         if (disposed) return;
         const entries = channel.presenceState<Presence>()[peerId] ?? [];
         const entry = [...entries].sort((first, second) => second.onlineAt.localeCompare(first.onlineAt))[0];
-        console.log(`[Presence Sync] Chat ${chatId}: peer ${peerId.slice(0, 8)}...`, { entry, isOnline: !!entry });
         // Only update if we have presence data - don't delete on transient sync events
         if (!entry) return;
         
@@ -112,7 +111,6 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
         });
       }).on('presence', { event: 'leave' }, () => {
         if (disposed) return;
-        console.log(`[Presence Leave] Chat ${chatId}: peer ${peerId.slice(0, 8)}... left`);
         // Only delete on explicit leave events, not transient syncs
         setPresenceByUser((current) => {
           if (!(peerId in current)) return current;
@@ -122,16 +120,12 @@ export function useChatActivity(chats: Chat[], profile: Profile | null, showDevi
         });
       }).subscribe((status) => {
         if (disposed) return;
-        console.log(`[Channel Subscribe] Chat ${chatId}: status=${status}`);
         if (status === 'SUBSCRIBED') {
           void publish(channel);
           // Force initial sync after subscribe
           setTimeout(() => {
             const entries = channel.presenceState<Presence>()[peerId] ?? [];
             const entry = [...entries].sort((first, second) => second.onlineAt.localeCompare(first.onlineAt))[0];
-            if (entry) {
-              console.log(`[Presence Initial] Chat ${chatId}: loaded entry for ${peerId.slice(0, 8)}...`, entry);
-            }
           }, 100);
         }
       });

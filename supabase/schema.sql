@@ -189,6 +189,8 @@ drop policy if exists "members send messages" on public.macrochat_messages;
 create policy "members send messages" on public.macrochat_messages for insert to authenticated with check (sender_id = auth.uid() and public.macrochat_is_conversation_member(conversation_id));
 drop policy if exists "senders update messages" on public.macrochat_messages;
 create policy "senders update messages" on public.macrochat_messages for update to authenticated using (sender_id = auth.uid()) with check (sender_id = auth.uid());
+drop policy if exists "senders delete messages" on public.macrochat_messages;
+create policy "senders delete messages" on public.macrochat_messages for delete to authenticated using (sender_id = auth.uid());
 drop policy if exists "members read reactions" on public.macrochat_message_reactions;
 create policy "members read reactions" on public.macrochat_message_reactions for select to authenticated using (
   exists (select 1 from public.macrochat_messages m where m.id = message_id and public.macrochat_is_conversation_member(m.conversation_id))

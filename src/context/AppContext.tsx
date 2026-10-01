@@ -113,7 +113,7 @@ type AppContextValue = {
   removeMessageReaction: (reactionId: string) => Promise<void>;
   postMessageComment: (messageId: string, text: string) => Promise<void>;
   removeMessageComment: (commentId: string) => Promise<void>;
-  deleteMessage: (chatId: string, messageId: string) => void;
+  deleteMessage: (chatId: string, messageId: string, deleteType?: 'me' | 'all') => void;
   editMessage: (chatId: string, messageId: string, newText: string) => void;
   toggleMessagePin: (chatId: string, messageId: string) => void;
   toggleMessageStar: (chatId: string, messageId: string) => void;
@@ -463,6 +463,17 @@ export function AppProvider({ children }: PropsWithChildren) {
   const localCallStreamRef = useRef<MediaStream | null>(null);
   const pendingIceRef = useRef<string[]>([]);
   const activeCallRef = useRef<ActiveCall | null>(null);
+  const deletedMessageIdsRef = useRef<Set<string>>(new Set()); // Track deleted messages to prevent re-adding from queue
+  
+  // Key cache for performance: store X3DH bundles and session keys with TTL
+  const keyBundleCache = useRef<Map<string, { data: any; fetchedAt: number }>>(new Map());
+  const sessionKeyCache = useRef<Map<string, { data: any; fetchedAt: number }>>(new Map());
+  const KEY_CACHE_TTL_MS = 30000; // 30 seconds
+  
+  // Debounce last_seen updates instead of doing per-message
+  const lastSeenUpdateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSeenUpdatePendingRef = useRef(false);
+  
   const [callHistory, setCallHistory] = useState<CallHistoryEntry[]>([]);
   const [updates, setUpdates] = useState<UpdateItem[]>([]);
   const [updateReactions, setUpdateReactions] = useState<Record<string, UpdateReaction[]>>({});
@@ -1519,16 +1530,43 @@ export function AppProvider({ children }: PropsWithChildren) {
     const reload = () => realtimeHandlers.current.loadChatsFromBackend().catch(() => undefined);
     void reload();
     void realtimeHandlers.current.refreshMessageReactions();
+    
+    // Debounce message queue to batch updates and prevent UI thrashing with bulk messages
+    const messageQueue: Array<{ row: MessageRow; notify: boolean }> = [];
+    let debounceTimer: NodeJS.Timeout | number | null = null;
+    const DEBOUNCE_MS = 250; // 250ms batch window for incoming messages
+    
+    const flushMessageQueue = () => {
+      if (messageQueue.length === 0) return;
+      const batch = [...messageQueue];
+      messageQueue.length = 0;
+      debounceTimer = null;
+      
+      // Apply all queued messages with single state update, filtering out deleted ones
+      batch.forEach(({ row, notify }) => {
+        if (!deletedMessageIdsRef.current.has(row.id) && (!row.client_id || !deletedMessageIdsRef.current.has(row.client_id))) {
+          realtimeHandlers.current.mergeRealtimeMessage(row, notify);
+        }
+      });
+      // DON'T clear here - wait until Supabase DELETE event confirms it's actually gone
+    };
+    
+    const queueMessage = (row: MessageRow, notify: boolean) => {
+      messageQueue.push({ row, notify });
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(flushMessageQueue, DEBOUNCE_MS);
+    };
+    
     const channel = supabase.channel(`macrochat-sync-${realtimeUserId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
-        realtimeHandlers.current.mergeRealtimeMessage(nextRow, true);
+        queueMessage(nextRow, true);
         if (nextRow.kind !== 'text') void reload();
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
         if (!nextRow) return;
-        realtimeHandlers.current.mergeRealtimeMessage(nextRow);
+        queueMessage(nextRow, false);
       })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const deleted = change.old as MessageRow;
@@ -1540,6 +1578,9 @@ export function AppProvider({ children }: PropsWithChildren) {
             messages: chat.messages.filter((message) => message.id !== deleted.id && (!deleted.client_id || message.clientId !== deleted.client_id)),
           };
         }));
+        // Clear from deleted tracking now that Supabase confirmed it's gone
+        deletedMessageIdsRef.current.delete(deleted.id);
+        if (deleted.client_id) deletedMessageIdsRef.current.delete(deleted.client_id);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'macrochat_message_reactions' }, () => {
         void realtimeHandlers.current.refreshMessageReactions();
@@ -1550,17 +1591,99 @@ export function AppProvider({ children }: PropsWithChildren) {
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') void reload();
       });
-    const refreshTimer = setInterval(reload, 8000);
+    // Increased from 8s to 60s to reduce network load; real-time subscriptions handle immediate updates
+    const refreshTimer = setInterval(reload, 60000);
     const appStateSubscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') void reload();
     });
 
     return () => {
       clearInterval(refreshTimer);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      flushMessageQueue(); // Flush any pending messages before cleanup
       appStateSubscription.remove();
       supabase?.removeChannel(channel);
     };
   }, [realtimeUserId]);
+
+  // Debounced last_seen update (batch profile updates instead of per-message)
+  const scheduleLastSeenUpdate = useCallback((actorUserId: string) => {
+    lastSeenUpdatePendingRef.current = true;
+    
+    if (lastSeenUpdateTimeoutRef.current) {
+      clearTimeout(lastSeenUpdateTimeoutRef.current);
+    }
+    
+    lastSeenUpdateTimeoutRef.current = setTimeout(async () => {
+      if (!supabase || !lastSeenUpdatePendingRef.current) return;
+      try {
+        await supabase
+          .from('macrochat_profiles')
+          .update({ last_seen: new Date().toISOString() })
+          .eq('id', actorUserId);
+      } catch (error) {
+        console.warn('Failed to update last_seen:', error);
+      }
+      lastSeenUpdatePendingRef.current = false;
+    }, 2000); // Batch updates every 2 seconds instead of per-message
+  }, [supabase]);
+
+  // Get cached X3DH key bundle or fetch if expired
+  const getKeyBundle = useCallback(async (userId: string) => {
+    if (!supabase) return null;
+    const cached = keyBundleCache.current.get(userId);
+    if (cached && Date.now() - cached.fetchedAt < KEY_CACHE_TTL_MS) {
+      return cached.data;
+    }
+    
+    try {
+      const result = await supabase
+        .from('macrochat_x3dh_key_bundles')
+        .select('device_id')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .order('published_at', { ascending: false })
+        .limit(1);
+      
+      if (result.data && result.data.length > 0) {
+        const data = result.data[0];
+        keyBundleCache.current.set(userId, { data, fetchedAt: Date.now() });
+        return data;
+      }
+    } catch (error) {
+      console.warn('Error fetching key bundle:', error);
+    }
+    return null;
+  }, [supabase]);
+
+  // Get cached session key or fetch if expired
+  const getSessionKey = useCallback(async (userId: string, peerId: string, deviceId: string, peerDeviceId: string) => {
+    if (!supabase) return null;
+    const cacheKey = `${userId}:${peerId}:${deviceId}:${peerDeviceId}`;
+    const cached = sessionKeyCache.current.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < KEY_CACHE_TTL_MS) {
+      return cached.data;
+    }
+    
+    try {
+      const result = await supabase
+        .from('macrochat_session_keys')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('peer_user_id', peerId)
+        .eq('device_id', deviceId)
+        .eq('peer_device_id', peerDeviceId);
+      
+      if (result.data && result.data.length > 0) {
+        const data = result.data[0];
+        sessionKeyCache.current.set(cacheKey, { data, fetchedAt: Date.now() });
+        return data;
+      }
+    } catch (error) {
+      console.warn('Error fetching session key:', error);
+    }
+    return null;
+  }, [supabase]);
 
   const logChatSystemMessage = useCallback((chatId: string, text: string) => {
     if (!chatId || !text.trim()) return;
@@ -2217,14 +2340,86 @@ export function AppProvider({ children }: PropsWithChildren) {
     setChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, unread: chat.unread > 0 ? 0 : 1 } : chat));
   }, []);
 
-  const deleteMessage = useCallback((chatId: string, messageId: string) => {
-    setChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, messages: chat.messages.filter((message) => message.id !== messageId) } : chat));
+  const deleteMessage = useCallback((chatId: string, messageId: string, deleteType: 'me' | 'all' = 'all') => {
+    // Find the message to get the correct server ID
+    const message = chats.find(c => c.id === chatId)?.messages.find(m => m.id === messageId || m.clientId === messageId);
+    
+    // Use the actual server ID for database deletion, never clientId
+    const actualMessageId = message?.id ?? messageId;
+    
+    // Validate it's a real UUID - CRITICAL for "Delete for All"
+    const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(actualMessageId);
+    
+    if (!isValidUuid) {
+      console.error('Delete message error: messageId is not a valid UUID:', actualMessageId);
+      if (deleteType === 'me') {
+        // For "Delete for Me", we can still hide it locally even if it's not synced yet
+        setChats((current) => current.map((chat) => {
+          if (chat.id !== chatId) return chat;
+          return {
+            ...chat,
+            messages: chat.messages.filter((msg) => msg.id !== messageId && msg.clientId !== messageId)
+          };
+        }));
+      }
+      return;
+    }
+    
+    // Mark this message as deleted to prevent it from being re-added by the message queue
+    deletedMessageIdsRef.current.add(actualMessageId);
+    if (message?.clientId) {
+      deletedMessageIdsRef.current.add(message.clientId);
+    }
+    
+    if (deleteType === 'me') {
+      // Delete for me: just hide from UI locally
+      setChats((current) => current.map((chat) => {
+        if (chat.id !== chatId) return chat;
+        return {
+          ...chat,
+          messages: chat.messages.filter((msg) => msg.id !== messageId && msg.clientId !== messageId)
+        };
+      }));
+      return;
+    }
+    
+    // Delete for all: optimistic delete from UI, then delete from database
+    setChats((current) => current.map((chat) => {
+      if (chat.id !== chatId) return chat;
+      return {
+        ...chat,
+        messages: chat.messages.filter((msg) => msg.id !== messageId && msg.clientId !== messageId)
+      };
+    }));
+    
+    // Delete from database permanently - use actual server ID
     if (supabase && profile) {
-      supabase.from('macrochat_messages').delete().eq('id', messageId).then(({ error }) => {
-        if (error) console.warn('Delete message DB warning:', error.message);
+      supabase.from('macrochat_messages').delete().eq('id', actualMessageId).then(({ error, data, count }) => {
+        if (error) {
+          console.error('Delete message error:', error.message);
+          // Restore message to UI if delete failed
+          if (message) {
+            setChats((current) => current.map((chat) => {
+              if (chat.id !== chatId) return chat;
+              // Find where to insert (maintain order)
+              const messageIndex = chat.messages.findIndex(m => {
+                const mTime = new Date(m.createdAt).getTime();
+                const msgTime = new Date(message.createdAt).getTime();
+                return mTime > msgTime;
+              });
+              const newMessages = [...chat.messages];
+              if (messageIndex === -1) {
+                newMessages.push(message);
+              } else {
+                newMessages.splice(messageIndex, 0, message);
+              }
+              return { ...chat, messages: newMessages };
+            }));
+          }
+        }
       });
     }
-  }, [profile]);
+  }, [supabase, profile, chats]);
 
   const editMessage = useCallback((chatId: string, messageId: string, newText: string) => {
     if (!newText.trim()) return;
@@ -2428,18 +2623,8 @@ export function AppProvider({ children }: PropsWithChildren) {
         if (data?.[0]) {
           const realId = data[0].id as string;
           
-          // Update user's last_seen timestamp
-          void (async () => {
-            try {
-              if (!supabase) return;
-              await supabase
-                .from('macrochat_profiles')
-                .update({ last_seen: new Date().toISOString() })
-                .eq('id', actorUserId);
-            } catch (error) {
-              console.warn('Failed to update last_seen:', error);
-            }
-          })();
+          // Use debounced last_seen update instead of immediate update (performance optimization)
+          scheduleLastSeenUpdate(actorUserId);
 
           setChats((current) => current.map((chat) => {
             if (chat.id !== chatId) return chat;
@@ -2472,7 +2657,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
 
     setTimeout(() => updateLocalMessageStatus('sent'), 350);
-  }, [chats, e2eePassphrase, profile, e2eePro, privacySettings.defaultMessageTtlSeconds]);
+  }, [chats, e2eePassphrase, profile, e2eePro, privacySettings.defaultMessageTtlSeconds, scheduleLastSeenUpdate]);
 
   const sendMediaMessage = useCallback(async (chatId: string, input: {
     kind: Exclude<MessageKind, 'text' | 'system'>;
@@ -2577,6 +2762,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       // Replace the optimistic message's id with the real UUID, matched by immutable clientId
       if (insertRes.data?.[0]) {
         const realId = (insertRes.data as any)[0].id;
+        // Debounce last_seen update for media messages too
+        scheduleLastSeenUpdate(actorUserId);
+        
         setChats((current) => current.map((chat) => chat.id === chatId
           ? {
               ...chat,
@@ -2595,7 +2783,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       updateLocalMessage({ status: 'sent' });
       console.warn('Media message sync warning', error instanceof Error ? error.message : error);
     }
-  }, [chats, profile, privacySettings.defaultMessageTtlSeconds]);
+  }, [chats, profile, privacySettings.defaultMessageTtlSeconds, scheduleLastSeenUpdate]);
 
   const addChat = useCallback(async (macroId: string) => {
     const normalized = macroId.trim().toUpperCase();

@@ -7,7 +7,6 @@
     "orientation": "portrait",
     "scheme": "macrochat",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.rpp.macrochat"
@@ -19,7 +18,6 @@
       "adaptiveIcon": {
         "backgroundColor": "#07111F"
       },
-      "edgeToEdgeEnabled": true,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

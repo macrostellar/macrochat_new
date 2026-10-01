@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, Dimensions, FlatList, Image, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Animated, Dimensions, FlatList, Image, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { router } from 'expo-router';
 import { Video, ResizeMode } from 'expo-av';
@@ -86,6 +86,38 @@ const FONT_FAMILIES = [
   { label: 'Georgia', value: 'Georgia, serif' },
 ];
 const TEXT_COLORS = [colors.white, '#FF6B9D', '#C44569', '#F8B195', '#F67035', '#55B9FF', '#2ECC71', '#F1C40F'];
+
+// Render text with clickable links
+function MessageTextWithLinks({ text, style }: { text: string; style: any }) {
+  const urlRegex = /(https?:\/\/[^\s]+)/gi;
+  const parts = text.split(urlRegex);
+  
+  return (
+    <Text style={style} selectable>
+      {parts.map((part, idx) => {
+        if (!part) return null;
+        if (/(https?:\/\/[^\s]+)/i.test(part)) {
+          return (
+            <Text
+              key={idx}
+              style={{ color: colors.blue, textDecorationLine: 'underline' }}
+              onPress={() => {
+                if (Platform.OS === 'web') {
+                  window.open(part, '_blank');
+                } else {
+                  Linking.openURL(part).catch(() => {});
+                }
+              }}
+            >
+              {part}
+            </Text>
+          );
+        }
+        return <Text key={idx}>{part}</Text>;
+      })}
+    </Text>
+  );
+}
 
 function expiryLabel(expiresAt: string) {
   const remaining = new Date(expiresAt).getTime() - Date.now();
@@ -370,6 +402,7 @@ function Conversation({ chat }: { chat: Chat }) {
   const messageFontFamily = fontFamilyMap[appearanceSettings.fontFamily];
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
   const [profileViewer, setProfileViewer] = useState<{ name: string; macroId: string; avatarUrl?: string; avatarColor: string } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ chatId: string; messageId: string } | null>(null);
   const [videoRatios, setVideoRatios] = useState<Record<string, number>>({});
   const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
   const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
@@ -775,7 +808,16 @@ function Conversation({ chat }: { chat: Chat }) {
       return;
     }
     if (action === 'delete') {
-      deleteMessage(chat.id, currentMessage.id);
+      // CRITICAL: Must use server UUID (currentMessage.id) not clientId
+      const deleteId = currentMessage.id;
+      if (!isValidUuid) {
+        alert('Message is still sending. Please wait before deleting.');
+        closeMenu();
+        return;
+      }
+      
+      // Show custom delete confirmation modal
+      setDeleteConfirm({ chatId: chat.id, messageId: deleteId });
       closeMenu();
       return;
     }
@@ -1251,16 +1293,27 @@ function Conversation({ chat }: { chat: Chat }) {
                       <Text style={styles.attachmentText}>{item.fileName || item.text || item.kind}</Text>
                     </View>
                   ) : (
-                    <Text
-                      style={[
-                        styles.messageText,
-                        { fontSize: messageFontSize, lineHeight: messageFontSize + 6, fontFamily: messageFontFamily || 'system' },
-                        item.textColor ? { color: item.textColor } : null,
-                        item.fontStyle ? { fontStyle: item.fontStyle } : null,
-                      ]}
+                    <Pressable
+                      onLongPress={() => {
+                        // Copy message to clipboard on long press
+                        if (Platform.OS === 'web' && navigator.clipboard) {
+                          navigator.clipboard.writeText(item.text || '').then(() => {
+                            alert('Message copied!');
+                          }).catch(() => alert('Failed to copy'));
+                        }
+                      }}
+                      style={{ userSelect: 'text' } as any}
                     >
-                      {item.text}
-                    </Text>
+                      <MessageTextWithLinks
+                        text={item.text || ''}
+                        style={[
+                          styles.messageText,
+                          { fontSize: messageFontSize, lineHeight: messageFontSize + 6, fontFamily: messageFontFamily || 'system' },
+                          item.textColor ? { color: item.textColor } : null,
+                          item.fontStyle ? { fontStyle: item.fontStyle } : null,
+                        ]}
+                      />
+                    </Pressable>
                   )}
                   {(item.pinned || item.starred) && (
                     <View style={styles.messageFlagRow}>
@@ -1334,6 +1387,46 @@ function Conversation({ chat }: { chat: Chat }) {
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'forward'); }}><Ionicons name="arrow-redo-outline" size={14} color={colors.white} /><Text style={styles.actionText}>Forward</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'delete'); }}><Ionicons name="trash-outline" size={14} color={colors.danger} /><Text style={[styles.actionText, { color: colors.danger }]}>Delete</Text></Pressable>
         </View>
+      )}
+
+      {deleteConfirm && (
+        <Modal transparent animationType="fade" visible onRequestClose={() => setDeleteConfirm(null)}>
+          <Pressable style={styles.deleteConfirmBackdrop} onPress={() => setDeleteConfirm(null)}>
+            <Pressable style={styles.deleteConfirmCard} onPress={() => undefined}>
+              <Text style={styles.deleteConfirmTitle}>Delete Message</Text>
+              <Text style={styles.deleteConfirmText}>How would you like to delete this message?</Text>
+              
+              <View style={styles.deleteConfirmButtonGroup}>
+                <Pressable 
+                  style={[styles.deleteConfirmBtn, styles.deleteConfirmBtnDefault]}
+                  onPress={() => {
+                    deleteMessage(deleteConfirm.chatId, deleteConfirm.messageId, 'me');
+                    setDeleteConfirm(null);
+                  }}
+                >
+                  <Text style={styles.deleteConfirmBtnText}>Delete for Me</Text>
+                </Pressable>
+                
+                <Pressable 
+                  style={[styles.deleteConfirmBtn, styles.deleteConfirmBtnDanger]}
+                  onPress={() => {
+                    deleteMessage(deleteConfirm.chatId, deleteConfirm.messageId, 'all');
+                    setDeleteConfirm(null);
+                  }}
+                >
+                  <Text style={styles.deleteConfirmBtnDangerText}>Delete for All</Text>
+                </Pressable>
+                
+                <Pressable 
+                  style={[styles.deleteConfirmBtn, styles.deleteConfirmBtnCancel]}
+                  onPress={() => setDeleteConfirm(null)}
+                >
+                  <Text style={styles.deleteConfirmBtnCancelText}>Cancel</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
       )}
 
       {profileViewer && (
@@ -1877,7 +1970,7 @@ const styles = StyleSheet.create({
   dragDropOverlay: { position: 'absolute', inset: 0, zIndex: 50, backgroundColor: 'rgba(3, 11, 18, 0.35)', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
   dragDropBadge: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(14, 26, 38, 0.9)', borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.42)', borderRadius: 999, paddingHorizontal: 16, paddingVertical: 10 },
   dragDropText: { color: colors.white, fontSize: 12, fontWeight: '800', letterSpacing: 0.4 },
-  dismissOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 10, backgroundColor: 'transparent', pointerEvents: 'none' },
+  dismissOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 10, backgroundColor: 'transparent', pointerEvents: 'auto' },
   chatHeader: { position: 'relative', height: 68, backgroundColor: colors.navy900, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, zIndex: 20 },
   person: { flex: 1 },
   personName: { color: colors.white, fontWeight: '800', fontSize: 15 },
@@ -2079,4 +2172,17 @@ const styles = StyleSheet.create({
   forwardChatInfo: { flex: 1 },
   forwardChatName: { color: colors.white, fontSize: 14, fontWeight: '700' },
   forwardChatPreview: { color: colors.muted, fontSize: 11, marginTop: 2 },
+  // Delete confirmation modal styles
+  deleteConfirmBackdrop: { flex: 1, backgroundColor: 'rgba(2, 6, 16, 0.78)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 24 },
+  deleteConfirmCard: { width: '100%', maxWidth: 340, backgroundColor: colors.navy900, borderRadius: 24, borderWidth: 1, borderColor: colors.border, paddingTop: 28, paddingBottom: 24, paddingHorizontal: 24, alignItems: 'center', alignSelf: 'center' },
+  deleteConfirmTitle: { color: colors.white, fontSize: 22, fontWeight: '900', marginBottom: 12 },
+  deleteConfirmText: { color: colors.muted, fontSize: 14, textAlign: 'center', marginBottom: 28, lineHeight: 20 },
+  deleteConfirmButtonGroup: { width: '100%', gap: 12 },
+  deleteConfirmBtn: { width: '100%', paddingVertical: 14, borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
+  deleteConfirmBtnDefault: { backgroundColor: 'rgba(122, 209, 255, 0.12)', borderColor: 'rgba(122, 209, 255, 0.3)' },
+  deleteConfirmBtnText: { color: colors.blue, fontSize: 16, fontWeight: '700' },
+  deleteConfirmBtnDanger: { backgroundColor: 'rgba(255, 71, 87, 0.16)', borderColor: 'rgba(255, 71, 87, 0.4)' },
+  deleteConfirmBtnDangerText: { color: '#FF4757', fontSize: 16, fontWeight: '700' },
+  deleteConfirmBtnCancel: { backgroundColor: 'rgba(255, 255, 255, 0.08)', borderColor: 'rgba(255, 255, 255, 0.2)' },
+  deleteConfirmBtnCancelText: { color: colors.white, fontSize: 16, fontWeight: '700' },
 });

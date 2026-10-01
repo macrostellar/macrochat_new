@@ -1,5 +1,11 @@
 import { Platform } from 'react-native';
-import { Audio } from 'expo-av';
+
+let Audio: typeof import('expo-av').Audio | null = null;
+try {
+  Audio = require('expo-av').Audio;
+} catch {
+  Audio = null;
+}
 
 const RINGTONE_BASE_URL =
   'https://pofbkteiymgiwciamyll.supabase.co/storage/v1/object/public/macrochat-media';
@@ -89,6 +95,12 @@ async function play(slot: Playback, value: string, loop: boolean, limit?: number
   };
   const uri = resolveRingtoneUri(value);
   if (!uri) throw new Error('This sound is unavailable. Choose another tone.');
+
+  if (Platform.OS !== 'web' && !Audio) {
+    onFinished?.();
+    return;
+  }
+
   try {
     if (Platform.OS === 'web') {
       const element = new globalThis.Audio(uri);
@@ -105,9 +117,9 @@ async function play(slot: Playback, value: string, loop: boolean, limit?: number
     } else {
       await stopped;
       if (!current()) return;
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true, staysActiveInBackground: false, shouldDuckAndroid: true });
+      await Audio!.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true, staysActiveInBackground: false, shouldDuckAndroid: true });
       if (!current()) return;
-      const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: false, isLooping: loop });
+      const { sound } = await Audio!.Sound.createAsync({ uri }, { shouldPlay: false, isLooping: loop });
       if (!current()) { await sound.unloadAsync(); return; }
       slot.handle = { stop: async () => { sound.setOnPlaybackStatusUpdate(null); await sound.unloadAsync(); } };
       sound.setOnPlaybackStatusUpdate((status) => {
