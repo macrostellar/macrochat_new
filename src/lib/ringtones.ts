@@ -1,10 +1,10 @@
 import { Platform } from 'react-native';
 
-let Audio: typeof import('expo-av').Audio | null = null;
+let ExpoAudio: typeof import('expo-audio') | null = null;
 try {
-  Audio = require('expo-av').Audio;
+  ExpoAudio = require('expo-audio');
 } catch {
-  Audio = null;
+  ExpoAudio = null;
 }
 
 const RINGTONE_BASE_URL =
@@ -96,7 +96,7 @@ async function play(slot: Playback, value: string, loop: boolean, limit?: number
   const uri = resolveRingtoneUri(value);
   if (!uri) throw new Error('This sound is unavailable. Choose another tone.');
 
-  if (Platform.OS !== 'web' && !Audio) {
+  if (Platform.OS !== 'web' && !ExpoAudio) {
     onFinished?.();
     return;
   }
@@ -117,15 +117,23 @@ async function play(slot: Playback, value: string, loop: boolean, limit?: number
     } else {
       await stopped;
       if (!current()) return;
-      await Audio!.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true, staysActiveInBackground: false, shouldDuckAndroid: true });
-      if (!current()) return;
-      const { sound } = await Audio!.Sound.createAsync({ uri }, { shouldPlay: false, isLooping: loop });
-      if (!current()) { await sound.unloadAsync(); return; }
-      slot.handle = { stop: async () => { sound.setOnPlaybackStatusUpdate(null); await sound.unloadAsync(); } };
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish && !loop) finish();
+      await ExpoAudio!.setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+        shouldRouteThroughEarpiece: false,
+        interruptionModeAndroid: 'duckOthers',
       });
-      await sound.playAsync();
+      if (!current()) return;
+      const player = ExpoAudio!.createAudioPlayer({ uri });
+      if (!current()) { player.remove(); return; }
+      player.loop = loop;
+      player.volume = 0.8;
+      const subscription = player.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish && !loop) finish();
+      });
+      slot.handle = { stop: async () => { subscription.remove(); player.remove(); } };
+      player.play();
     }
     if (current() && limit) slot.timer = setTimeout(finish, limit);
   } catch (error) {

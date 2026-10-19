@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { CallOverlay } from '@/components/CallOverlay';
 import { TabActivityBadge } from '@/components/TabActivityBadge';
 import { AppProvider } from '@/context/AppContext';
+import { ApprovalsProvider } from '@/context/ApprovalsContext';
 import { colors } from '@/theme/colors';
 
 export default function RootLayout() {
@@ -38,6 +39,7 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AppProvider>
+      <ApprovalsProvider>
         <StatusBar style="light" />
         <TabActivityBadge />
         <CallOverlay />
@@ -59,7 +61,12 @@ export default function RootLayout() {
         <Stack.Screen name="scan-macro" options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
         <Stack.Screen name="camera" options={{ headerShown: false, presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
         <Stack.Screen name="security" options={{ headerShown: false }} />
+        <Stack.Screen name="approvals/[id]" options={{ headerShown: false, animation: Platform.OS === 'ios' ? 'slide_from_right' : 'fade_from_bottom' }} />
+        <Stack.Screen name="approvals/group/[id]" options={{ headerShown: false, animation: Platform.OS === 'ios' ? 'slide_from_right' : 'fade_from_bottom' }} />
+        <Stack.Screen name="approvals/new" options={{ headerShown: false, presentation: Platform.OS === 'web' ? 'card' : 'modal', animation: Platform.OS === 'web' ? 'fade' : 'slide_from_bottom' }} />
+        <Stack.Screen name="approvals/new-group" options={{ headerShown: false, presentation: Platform.OS === 'web' ? 'card' : 'modal', animation: Platform.OS === 'web' ? 'fade' : 'slide_from_bottom' }} />
       </Stack>
+      </ApprovalsProvider>
       </AppProvider>
     </GestureHandlerRootView>
   );

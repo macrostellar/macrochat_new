@@ -6,11 +6,18 @@ import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
-import { Audio, ResizeMode, Video } from 'expo-av';
+import {
+  AudioModule,
+  RecordingPresets,
+  createAudioPlayer,
+  setAudioModeAsync,
+  useAudioRecorder,
+  type AudioPlayer,
+} from 'expo-audio';
 import { Avatar } from '@/components/Avatar';
 import { AmbientQuantumField } from '@/components/AmbientQuantumField';
 import { MessageTimerBorder } from '@/components/MessageTimerBorder';
-import { VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
+import { VideoPreviewPlayer, VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
 import { WebMessenger } from '@/components/WebMessenger';
 import { STICKER_LIST, type Sticker } from '@/lib/stickers';
 import { useApp } from '@/context/AppContext';
@@ -123,7 +130,7 @@ export default function ConversationScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string | string[] }>();
   const chatId = Array.isArray(id) ? id[0] : id;
-  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, logChatSystemMessage, markRead, refreshChats, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall, pinChat, muteChat, clearChat, blockContact, deleteMessage, editMessage, setChatDisappearingTimer, postMessageReaction, messageReactions, appearanceSettings, toggleMessagePin, toggleMessageStar } = useApp();
+  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, logChatSystemMessage, markRead, refreshChats, loadOlderMessages, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall, pinChat, muteChat, clearChat, blockContact, deleteMessage, editMessage, setChatDisappearingTimer, postMessageReaction, messageReactions, appearanceSettings, toggleMessagePin, toggleMessageStar } = useApp();
   const chat = chats.find((item) => item.id === chatId);
   const e2eeActive = e2eeEnabled || Boolean(e2eePro);
   const showDeviceStatus = Boolean(chat?.peerDevice);
@@ -135,7 +142,8 @@ export default function ConversationScreen() {
   const [autoResolveAttempted, setAutoResolveAttempted] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [attachmentPanelOpen, setAttachmentPanelOpen] = useState(false);
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const [recording, setRecording] = useState(false);
   const [webRecording, setWebRecording] = useState(false);
   const [recordingSince, setRecordingSince] = useState<number | null>(null);
   const [activeVoiceId, setActiveVoiceId] = useState<string | null>(null);
@@ -150,12 +158,23 @@ export default function ConversationScreen() {
   const [videoRatios, setVideoRatios] = useState<Record<string, number>>({});
   const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
   const [replyJumpTargetId, setReplyJumpTargetId] = useState<string | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+
+  const handleLoadOlder = async () => {
+    if (!chat || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      await loadOlderMessages(chat.id);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
 
   const list = useRef<FlatList<Message>>(null);
   const inputRef = useRef<TextInput>(null);
   const swipeableRefs = useRef<Record<string, any>>({});
   const pendingSendScroll = useRef(false);
-  const voiceSound = useRef<Audio.Sound | null>(null);
+  const voiceSound = useRef<AudioPlayer | null>(null);
   const webRecorder = useRef<MediaRecorder | null>(null);
   const webRecorderChunks = useRef<Blob[]>([]);
   const webAudio = useRef<HTMLAudioElement | null>(null);
@@ -264,10 +283,15 @@ export default function ConversationScreen() {
 
   useEffect(() => {
     return () => {
-      const sound = voiceSound.current;
-      if (!sound) return;
-      sound.stopAsync().catch(() => undefined);
-      sound.unloadAsync().catch(() => undefined);
+      const player = voiceSound.current;
+      if (player) {
+        voiceSound.current = null;
+        try {
+          player.remove();
+        } catch {
+          // Player may already be released.
+        }
+      }
       if (webAudio.current) {
         webAudio.current.pause();
         webAudio.current = null;
@@ -340,14 +364,15 @@ export default function ConversationScreen() {
   }
 
   const stopActiveVoice = async () => {
-    if (!voiceSound.current) return;
-    try {
-      await voiceSound.current.stopAsync();
-      await voiceSound.current.unloadAsync();
-    } catch {
-      // Ignore stop/unload errors.
-    }
+    const player = voiceSound.current;
     voiceSound.current = null;
+    if (player) {
+      try {
+        player.remove();
+      } catch {
+        // Player may already be released.
+      }
+    }
     setActiveVoiceId(null);
     setActiveVoiceProgress({ position: 0, duration: 1 });
   };
@@ -464,9 +489,9 @@ export default function ConversationScreen() {
 
     if (!recording) return;
     try {
-      await recording.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-      const uri = recording.getURI();
+      await audioRecorder.stop();
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      const uri = audioRecorder.uri;
       const duration = recordingSince ? Date.now() - recordingSince : 0;
       if (!uri) {
         Alert.alert('Voice note failed', 'No recorded audio file was found.');
@@ -482,7 +507,7 @@ export default function ConversationScreen() {
     } catch {
       Alert.alert('Voice note failed', 'Unable to stop recording. Please try again.');
     } finally {
-      setRecording(null);
+      setRecording(false);
       setRecordingSince(null);
     }
   };
@@ -525,18 +550,20 @@ export default function ConversationScreen() {
     await stopActiveVoice();
 
     try {
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: payload.uri },
-        { shouldPlay: true },
-        (status) => {
-          if (!status.isLoaded) return;
-          setActiveVoiceProgress({ position: status.positionMillis ?? 0, duration: status.durationMillis ?? payload.durationMs ?? 1 });
-          if (status.didJustFinish) {
-            stopActiveVoice().catch(() => undefined);
-          }
-        },
-      );
-      voiceSound.current = sound;
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      const player = createAudioPlayer({ uri: payload.uri });
+      voiceSound.current = player;
+      player.addListener('playbackStatusUpdate', (status) => {
+        if (voiceSound.current !== player) return;
+        setActiveVoiceProgress({
+          position: (status.currentTime ?? 0) * 1000,
+          duration: (status.duration ? status.duration * 1000 : payload.durationMs) || 1,
+        });
+        if (status.didJustFinish) {
+          stopActiveVoice().catch(() => undefined);
+        }
+      });
+      player.play();
       setActiveVoiceId(messageId);
     } catch {
       Alert.alert('Voice note failed', 'Unable to play this voice note.');
@@ -595,18 +622,17 @@ export default function ConversationScreen() {
       return;
     }
 
-    const permission = await Audio.requestPermissionsAsync();
+    const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) {
       Alert.alert('Permission needed', 'Allow microphone access to record voice notes.');
       return;
     }
 
     try {
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const next = new Audio.Recording();
-      await next.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      await next.startAsync();
-      setRecording(next);
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setRecording(true);
       setRecordingSince(Date.now());
     } catch {
       Alert.alert('Voice note failed', 'Unable to start recording. Please try again.');
@@ -785,6 +811,11 @@ export default function ConversationScreen() {
             </Pressable>
           ) : null
         }
+        ListFooterComponent={chat?.hasOlderMessages ? (
+          <Pressable style={styles.loadOlderButton} onPress={handleLoadOlder} disabled={loadingOlder}>
+            <Text style={styles.loadOlderText}>{loadingOlder ? 'Loading...' : 'Load older messages'}</Text>
+          </Pressable>
+        ) : null}
         style={styles.messagesList}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.messages}
@@ -1233,7 +1264,7 @@ export default function ConversationScreen() {
           </Pressable>
           <View style={styles.previewBody}>
             {preview.kind === 'video' ? (
-              <Video source={{ uri: preview.uri }} style={[styles.previewMedia, { aspectRatio: preview.ratio || 16 / 9 }]} resizeMode={ResizeMode.CONTAIN} useNativeControls shouldPlay />
+              <VideoPreviewPlayer uri={preview.uri} style={[styles.previewMedia, { aspectRatio: preview.ratio || 16 / 9 }]} autoPlay />
             ) : (
               <Image source={{ uri: preview.uri }} style={styles.previewImage} resizeMode="contain" />
             )}
@@ -1306,7 +1337,9 @@ const styles = StyleSheet.create({
   retryText: { color: colors.navy950, fontWeight: '800', fontSize: 13 },
   header: { height: 62, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, gap: 9, backgroundColor: colors.navy900, borderBottomWidth: 1, borderBottomColor: colors.border }, back: { padding: 5 }, person: { flex: 1 }, name: { color: colors.white, fontSize: 16, fontWeight: '800' }, presence: { color: colors.muted, fontSize: 11, marginTop: 2 }, presenceActive: { color: colors.neon }, action: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' }, typingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 2 }, typingDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.neon },
   encryption: { alignSelf: 'center', flexDirection: 'row', gap: 5, marginTop: 10, backgroundColor: colors.navy800, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 }, encryptionText: { color: colors.muted, fontSize: 10 },
-  pinnedMessageBar: { marginHorizontal: 12, marginTop: 8, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.30)', backgroundColor: colors.navy900, paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 8, zIndex: 20, shadowColor: 'rgba(0,0,0,0.2)', shadowOpacity: 0.18, shadowRadius: 7, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
+  loadOlderButton: { alignSelf: 'center', marginVertical: 10, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy900, paddingHorizontal: 14, paddingVertical: 6 },
+  loadOlderText: { color: colors.white, fontSize: 12, fontWeight: '700' },
+  pinnedMessageBar: { marginHorizontal: 12, marginTop: 8, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(120, 204, 255, 0.30)', backgroundColor: colors.navy900, paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 8, zIndex: 20, boxShadow: '0 2px 7px rgba(0, 0, 0, 0.036)', elevation: 2 },
   pinnedMessageText: { flex: 1, color: colors.white, fontSize: 12, fontWeight: '700' },
   callBanner: { marginHorizontal: 12, marginTop: 8, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy800, padding: 10 },
   callBannerText: { color: colors.white, fontWeight: '700', fontSize: 12 },

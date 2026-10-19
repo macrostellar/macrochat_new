@@ -85,6 +85,7 @@ type AppContextValue = {
   addChat: (macroId: string) => Promise<string>;
   markRead: (chatId: string) => void;
   refreshChats: () => Promise<void>;
+  loadOlderMessages: (chatId: string) => Promise<number>;
   startAudioCall: (chatId: string) => Promise<void>;
   startVideoCall: (chatId: string) => Promise<void>;
   acceptIncomingCall: () => void;
@@ -174,6 +175,111 @@ type DbErrorLike = {
   details?: string;
   hint?: string;
 };
+
+// Number of messages fetched per conversation page. Older pages are loaded on demand.
+const MESSAGE_PAGE_SIZE = 50;
+const BASE_MESSAGE_SELECT = 'id,client_id,conversation_id,sender_id,body,kind,media_path,body_ciphertext,body_nonce,encryption_version,reply_to,created_at,expires_at';
+const FULL_MESSAGE_SELECT = `${BASE_MESSAGE_SELECT},pinned_at,starred_by_user_id,text_color,font_style,font_family`;
+
+// Fetches the newest page of messages in a conversation (or the page before `before`). Rows are returned oldest first.
+async function fetchMessagePage(
+  client: NonNullable<typeof supabase>,
+  conversationId: string,
+  before: string | null,
+): Promise<{ rows: MessageRow[]; error: DbErrorLike | null }> {
+  const run = (select: string) => {
+    const base: any = client.from('macrochat_messages').select(select).eq('conversation_id', conversationId);
+    const filtered = before ? base.lt('created_at', before) : base;
+    return filtered.order('created_at', { ascending: false }).limit(MESSAGE_PAGE_SIZE);
+  };
+
+  let result: any = await run(BASE_MESSAGE_SELECT);
+  if (result.error && /pinned_at|starred_by_user_id|text_color|font_style|font_family|column .* does not exist/i.test(result.error.message ?? '')) {
+    const extended: any = await run(FULL_MESSAGE_SELECT);
+    if (!extended.error) result = extended;
+  }
+
+  const rows = ((result.data ?? []) as MessageRow[]).slice().reverse();
+  return { rows, error: (result.error as DbErrorLike | null) ?? null };
+}
+
+type MessageMapContext = {
+  actorUserId: string;
+  isGroup: boolean;
+  peerUserId?: string;
+  otherReceiptReadAt?: string | null;
+  signedByPath: Map<string, string>;
+  e2eePassphrase: string | null;
+  e2eePro: E2EEProService | null;
+};
+
+// Converts a raw message row into the client `Message` shape (decrypts, resolves media URLs, computes status).
+function mapMessageRow(row: MessageRow, ctx: MessageMapContext): Message {
+  const { actorUserId, isGroup, peerUserId: otherUserId, otherReceiptReadAt, signedByPath, e2eePassphrase, e2eePro } = ctx;
+  const mediaMeta = parseMediaBody(row.body);
+  const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
+  let displayText = mediaMeta.text || row.body;
+  if (encrypted) {
+    let decryptedText: string | null = null;
+    if (row.body_ciphertext && row.body_nonce) {
+      if (e2eePassphrase) {
+        decryptedText = decryptTextWithPassphrase(row.body_ciphertext, row.body_nonce, e2eePassphrase);
+      }
+      if (!decryptedText && e2eePro) {
+        const peerUserId = row.sender_id === actorUserId ? otherUserId : row.sender_id;
+        if (peerUserId) {
+          decryptedText = e2eePro.decryptCiphertextSync(row.body_ciphertext, row.body_nonce, peerUserId);
+        }
+      }
+    }
+    if (decryptedText) {
+      displayText = decryptedText;
+    } else if (row.body && !/^\[encrypted/i.test(row.body)) {
+      displayText = row.body;
+    } else if (row.encryption_version === 'mc-e2ee-v2-pro') {
+      displayText = '[Encrypted with E2EE Pro]';
+    } else {
+      displayText = '[Encrypted message]';
+    }
+  } else if (row.kind !== 'text' && row.kind !== 'system' && row.kind !== 'call') {
+    displayText = mediaMeta.name || mediaMeta.text || row.body || row.kind;
+  }
+
+  const fontStyle: 'normal' | 'italic' | undefined =
+    row.font_style === 'italic' || row.font_style === 'normal'
+      ? row.font_style
+      : mediaMeta.fontStyle === 'italic' || mediaMeta.fontStyle === 'normal'
+        ? mediaMeta.fontStyle
+        : undefined;
+
+  return {
+    id: row.id,
+    clientId: row.client_id ?? undefined,
+    chatId: row.conversation_id,
+    senderId: row.sender_id === actorUserId ? 'me' : row.sender_id,
+    text: displayText,
+    kind: row.kind,
+    mediaPath: row.media_path ?? undefined,
+    mediaUrl: mediaMeta.signedUrl || mediaMeta.dataUrl || (row.media_path ? (row.media_path.startsWith('data:') ? row.media_path : signedByPath.get(row.media_path)) : undefined),
+    fileName: mediaMeta.name,
+    mimeType: mediaMeta.mimeType,
+    durationMs: mediaMeta.durationMs,
+    textColor: row.text_color || mediaMeta.textColor,
+    fontStyle,
+    fontFamily: row.font_family || mediaMeta.fontFamily,
+    callInfo: mediaMeta.callInfo,
+    encrypted,
+    encryptionVersion: row.encryption_version ?? undefined,
+    ciphertext: row.body_ciphertext ?? undefined,
+    nonce: row.body_nonce ?? undefined,
+    createdAt: row.created_at,
+    status: !isGroup && row.sender_id === actorUserId && otherReceiptReadAt && new Date(otherReceiptReadAt).getTime() >= new Date(row.created_at).getTime() ? 'read' : row.sender_id === actorUserId ? 'sent' : 'delivered',
+    replyTo: row.reply_to ?? undefined,
+    pinned: Boolean(row.pinned_at),
+    starred: Boolean(row.starred_by_user_id) && row.starred_by_user_id === actorUserId,
+    expiresAt: row.expires_at ?? undefined,
+  };
+}
 
 const getMessageReactionKey = (messageId: string, userId: string, emoji: string) => `${messageId}::${userId}::${emoji}`;
 
@@ -1039,6 +1145,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const loadChatsFromBackend = useCallback(async () => {
     if (!supabase || !profile) return;
+    const client = supabase;
 
     if (e2eePro) {
       try {
@@ -1067,9 +1174,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    const baseMessageSelect = 'id,client_id,conversation_id,sender_id,body,kind,media_path,body_ciphertext,body_nonce,encryption_version,reply_to,created_at,expires_at';
-    const fullMessageSelect = `${baseMessageSelect},pinned_at,starred_by_user_id,text_color,font_style,font_family`;
-    const [conversationsRes, conversationMembersRes, messagesRes] = await Promise.all([
+    const [conversationsRes, conversationMembersRes, messagePages] = await Promise.all([
       supabase
         .from('macrochat_conversations')
         .select('id,title,is_group,updated_at,message_ttl_seconds')
@@ -1078,32 +1183,20 @@ export function AppProvider({ children }: PropsWithChildren) {
         .from('macrochat_conversation_members')
         .select('conversation_id,user_id,role,last_read_at,receipt_read_at,macrochat_profiles(id,macro_id,display_name,avatar_color,avatar_url,last_seen)')
         .in('conversation_id', conversationIds),
-      supabase
-        .from('macrochat_messages')
-        .select(baseMessageSelect)
-        .in('conversation_id', conversationIds)
-        .order('created_at', { ascending: true }),
+      Promise.all(conversationIds.map((conversationId) => fetchMessagePage(client, conversationId, null))),
     ]);
 
-    let resolvedMessagesRes: { data: MessageRow[] | null; error: DbErrorLike | null } = messagesRes as any;
-    if (messagesRes.error && /pinned_at|starred_by_user_id|text_color|font_style|font_family|column .* does not exist/i.test(messagesRes.error.message)) {
-      const extendedRes = await supabase
-        .from('macrochat_messages')
-        .select(fullMessageSelect)
-        .in('conversation_id', conversationIds)
-        .order('created_at', { ascending: true });
-      if (!extendedRes.error) {
-        resolvedMessagesRes = extendedRes as any;
-      }
-    }
-
-    if (conversationsRes.error || conversationMembersRes.error || resolvedMessagesRes.error) {
-      console.warn('Failed to load conversations/messages', { conversation: conversationsRes.error?.message, memberships: conversationMembersRes.error?.message, messages: resolvedMessagesRes.error?.message });
+    const messagesError = messagePages.find((page) => page.error)?.error ?? null;
+    if (conversationsRes.error || conversationMembersRes.error || messagesError) {
+      console.warn('Failed to load conversations/messages', { conversation: conversationsRes.error?.message, memberships: conversationMembersRes.error?.message, messages: messagesError?.message });
       return;
     }
 
     const members = (conversationMembersRes.data ?? []) as unknown as ConversationMemberRow[];
-    const messages = (resolvedMessagesRes.data ?? []) as MessageRow[];
+    const messagesByConversation = new Map<string, MessageRow[]>(
+      conversationIds.map((conversationId, index): [string, MessageRow[]] => [conversationId, messagePages[index].rows]),
+    );
+    const messages = messagePages.flatMap((page) => page.rows);
     const mediaPaths = [...new Set(messages.map((row) => row.media_path).filter((path): path is string => typeof path === 'string' && Boolean(path) && !path.startsWith('data:')))];
     const signedByPath = new Map<string, string>();
 
@@ -1127,74 +1220,17 @@ export function AppProvider({ children }: PropsWithChildren) {
 
       const mappedMessages: Message[] = clearedChatIdsRef.current.has(conversation.id)
         ? []
-        : messages
-            .filter((row) => row.conversation_id === conversation.id)
+        : (messagesByConversation.get(conversation.id) ?? [])
             .filter((row) => !row.expires_at || new Date(row.expires_at).getTime() > Date.now())
-            .map((row) => {
-          const mediaMeta = parseMediaBody(row.body);
-          const encrypted = Boolean(row.body_ciphertext && row.body_nonce && row.encryption_version);
-          let displayText = mediaMeta.text || row.body;
-          if (encrypted) {
-            let decryptedText: string | null = null;
-            if (row.body_ciphertext && row.body_nonce) {
-              if (e2eePassphrase) {
-                decryptedText = decryptTextWithPassphrase(row.body_ciphertext, row.body_nonce, e2eePassphrase);
-              }
-              if (!decryptedText && e2eePro) {
-                const peerUserId = row.sender_id === actorUserId ? other?.user_id : row.sender_id;
-                if (peerUserId) {
-                  decryptedText = e2eePro.decryptCiphertextSync(row.body_ciphertext, row.body_nonce, peerUserId);
-                }
-              }
-            }
-            if (decryptedText) {
-              displayText = decryptedText;
-            } else if (row.body && !/^\[encrypted/i.test(row.body)) {
-              displayText = row.body;
-            } else if (row.encryption_version === 'mc-e2ee-v2-pro') {
-              displayText = '[Encrypted with E2EE Pro]';
-            } else {
-              displayText = '[Encrypted message]';
-            }
-          } else if (row.kind !== 'text' && row.kind !== 'system' && row.kind !== 'call') {
-            displayText = mediaMeta.name || mediaMeta.text || row.body || row.kind;
-          }
-
-          const fontStyle: 'normal' | 'italic' | undefined =
-            row.font_style === 'italic' || row.font_style === 'normal'
-              ? row.font_style
-              : mediaMeta.fontStyle === 'italic' || mediaMeta.fontStyle === 'normal'
-                ? mediaMeta.fontStyle
-                : undefined;
-
-          return {
-            id: row.id,
-            clientId: row.client_id ?? undefined,
-            chatId: row.conversation_id,
-            senderId: row.sender_id === actorUserId ? 'me' : row.sender_id,
-            text: displayText,
-            kind: row.kind,
-            mediaPath: row.media_path ?? undefined,
-            mediaUrl: mediaMeta.signedUrl || mediaMeta.dataUrl || (row.media_path ? (row.media_path.startsWith('data:') ? row.media_path : signedByPath.get(row.media_path)) : undefined),
-            fileName: mediaMeta.name,
-            mimeType: mediaMeta.mimeType,
-            durationMs: mediaMeta.durationMs,
-            textColor: row.text_color || mediaMeta.textColor,
-            fontStyle,
-            fontFamily: row.font_family || mediaMeta.fontFamily,
-            callInfo: mediaMeta.callInfo,
-            encrypted,
-            encryptionVersion: row.encryption_version ?? undefined,
-            ciphertext: row.body_ciphertext ?? undefined,
-            nonce: row.body_nonce ?? undefined,
-            createdAt: row.created_at,
-            status: !conversation.is_group && row.sender_id === actorUserId && otherReceiptReadAt && new Date(otherReceiptReadAt).getTime() >= new Date(row.created_at).getTime() ? 'read' : row.sender_id === actorUserId ? 'sent' : 'delivered',
-            replyTo: row.reply_to ?? undefined,
-            pinned: Boolean(row.pinned_at),
-            starred: Boolean(row.starred_by_user_id) && row.starred_by_user_id === actorUserId,
-            expiresAt: row.expires_at ?? undefined,
-          };
-        });
+            .map((row) => mapMessageRow(row, {
+              actorUserId,
+              isGroup: Boolean(conversation.is_group),
+              peerUserId: other?.user_id,
+              otherReceiptReadAt,
+              signedByPath,
+              e2eePassphrase,
+              e2eePro,
+            }));
 
       const unread = mappedMessages.filter((message) => {
         if (message.senderId === 'me') return false;
@@ -1238,6 +1274,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         muted: mutedChatIdsRef.current.has(conversation.id),
         disappearingSeconds: conversation.message_ttl_seconds,
         messages: mappedMessages,
+        hasOlderMessages: (messagesByConversation.get(conversation.id)?.length ?? 0) >= MESSAGE_PAGE_SIZE,
       };
     }).filter((chat) => !deletedChatIdsRef.current.has(chat.id) && (!chat.participantUserId || !blockedContacts.some((contact) => contact.id === chat.participantUserId)));
 
@@ -1271,7 +1308,18 @@ export function AppProvider({ children }: PropsWithChildren) {
         if (pending.length > 0) pendingByConversation.set(chat.id, pending);
       });
 
-      return builtChats.map((chat) => {
+      // A reload only fetches the newest page. Keep older messages the user already loaded.
+      const withLoadedHistory = builtChats.map((chat) => {
+        const existing = current.find((item) => item.id === chat.id);
+        const oldestFetched = chat.messages[0]?.createdAt;
+        if (!existing || !oldestFetched || clearedChatIdsRef.current.has(chat.id)) return chat;
+        const oldestFetchedTime = new Date(oldestFetched).getTime();
+        const olderLoaded = existing.messages.filter((message) => new Date(message.createdAt).getTime() < oldestFetchedTime);
+        if (olderLoaded.length === 0) return chat;
+        return { ...chat, hasOlderMessages: existing.hasOlderMessages, messages: [...olderLoaded, ...chat.messages] };
+      });
+
+      return withLoadedHistory.map((chat) => {
         const pending = pendingByConversation.get(chat.id);
         if (!pending || pending.length === 0) return chat;
 
@@ -1292,7 +1340,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     void refreshMessageReactions();
   }, [blockedContacts, e2eePassphrase, e2eePro, profile, refreshMessageReactions]);
 
-  const mergeRealtimeMessage = useCallback((row: MessageRow, notify = false) => {
+  const mergeRealtimeMessage = useCallback((row: MessageRow, notify = false, existingOnly = false) => {
     if (!profile) return;
 
     const mediaMeta = parseMediaBody(row.body);
@@ -1404,6 +1452,7 @@ export function AppProvider({ children }: PropsWithChildren) {
             : m),
         };
       }
+      if (existingOnly) return chat;
       return {
         ...chat,
         unread: incoming.senderId === 'me' ? chat.unread : chat.unread + 1,
@@ -1411,6 +1460,66 @@ export function AppProvider({ children }: PropsWithChildren) {
       };
     }));
   }, [e2eePro, e2eePassphrase, profile, chats, notificationPrefs]);
+
+  // Loads the next older page of messages for a chat and prepends it. Returns the number of messages added.
+  const loadOlderMessages = useCallback(async (chatId: string): Promise<number> => {
+    if (!supabase || !profile) return 0;
+    const client = supabase;
+    const chat = chats.find((item) => item.id === chatId);
+    const oldest = chat?.messages[0];
+    if (!chat || !chat.hasOlderMessages || !oldest || clearedChatIdsRef.current.has(chatId)) return 0;
+
+    const actorUserId = await getAuthenticatedUserId(client);
+    const page = await fetchMessagePage(client, chatId, oldest.createdAt);
+    if (page.error) {
+      console.warn('Failed to load older messages', page.error.message);
+      return 0;
+    }
+
+    let otherReceiptReadAt: string | null = null;
+    if (!chat.isGroup && chat.participantUserId) {
+      const { data } = await client
+        .from('macrochat_conversation_members')
+        .select('receipt_read_at')
+        .eq('conversation_id', chatId)
+        .eq('user_id', chat.participantUserId)
+        .maybeSingle();
+      otherReceiptReadAt = (data?.receipt_read_at as string | null | undefined) ?? null;
+    }
+
+    const mediaPaths = [...new Set(page.rows.map((row) => row.media_path).filter((path): path is string => typeof path === 'string' && Boolean(path) && !path.startsWith('data:')))];
+    const signedByPath = new Map<string, string>();
+    if (mediaPaths.length > 0) {
+      const signedRes = await client.storage.from('macrochat-media').createSignedUrls(mediaPaths, 60 * 5);
+      if (!signedRes.error && signedRes.data) {
+        mediaPaths.forEach((path, index) => {
+          const signedUrl = signedRes.data?.[index]?.signedUrl;
+          if (signedUrl) signedByPath.set(path, signedUrl);
+        });
+      }
+    }
+
+    const olderMessages = page.rows
+      .filter((row) => !row.expires_at || new Date(row.expires_at).getTime() > Date.now())
+      .map((row) => mapMessageRow(row, {
+        actorUserId,
+        isGroup: Boolean(chat.isGroup),
+        peerUserId: chat.participantUserId,
+        otherReceiptReadAt,
+        signedByPath,
+        e2eePassphrase,
+        e2eePro,
+      }));
+    const hasMore = page.rows.length >= MESSAGE_PAGE_SIZE;
+
+    setChats((current) => current.map((item) => {
+      if (item.id !== chatId) return item;
+      const existingIds = new Set(item.messages.map((message) => message.id));
+      const fresh = olderMessages.filter((message) => !existingIds.has(message.id));
+      return { ...item, hasOlderMessages: hasMore, messages: [...fresh, ...item.messages] };
+    }));
+    return olderMessages.length;
+  }, [chats, e2eePassphrase, e2eePro, profile]);
 
   useEffect(() => {
     readProfileFromStorage()
@@ -1527,46 +1636,41 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!supabase) { setChats(demoChats); return; }
     if (!realtimeUserId) { setChats([]); return; }
+    // Full reloads run on login, reconnect, and membership changes. Message events are applied directly.
     const reload = () => realtimeHandlers.current.loadChatsFromBackend().catch(() => undefined);
     void reload();
     void realtimeHandlers.current.refreshMessageReactions();
-    
-    // Debounce message queue to batch updates and prevent UI thrashing with bulk messages
-    const messageQueue: Array<{ row: MessageRow; notify: boolean }> = [];
-    let debounceTimer: NodeJS.Timeout | number | null = null;
-    const DEBOUNCE_MS = 250; // 250ms batch window for incoming messages
-    
-    const flushMessageQueue = () => {
-      if (messageQueue.length === 0) return;
-      const batch = [...messageQueue];
-      messageQueue.length = 0;
-      debounceTimer = null;
-      
-      // Apply all queued messages with single state update, filtering out deleted ones
-      batch.forEach(({ row, notify }) => {
-        if (!deletedMessageIdsRef.current.has(row.id) && (!row.client_id || !deletedMessageIdsRef.current.has(row.client_id))) {
-          realtimeHandlers.current.mergeRealtimeMessage(row, notify);
-        }
-      });
-      // DON'T clear here - wait until Supabase DELETE event confirms it's actually gone
+
+    const isLocallyDeleted = (row: MessageRow) =>
+      deletedMessageIdsRef.current.has(row.id) || (Boolean(row.client_id) && deletedMessageIdsRef.current.has(row.client_id));
+
+    // Signs the media URL for a message that arrived without one, then patches it into state.
+    const signMediaForRow = async (row: MessageRow) => {
+      if (!supabase || !row.media_path || row.media_path.startsWith('data:')) return;
+      const { data } = await supabase.storage.from('macrochat-media').createSignedUrl(row.media_path, 60 * 5);
+      const signedUrl = data?.signedUrl;
+      if (!signedUrl) return;
+      setChats((current) => current.map((chat) => {
+        if (chat.id !== row.conversation_id) return chat;
+        return {
+          ...chat,
+          messages: chat.messages.map((message) => (message.id === row.id && !message.mediaUrl ? { ...message, mediaUrl: signedUrl } : message)),
+        };
+      }));
     };
-    
-    const queueMessage = (row: MessageRow, notify: boolean) => {
-      messageQueue.push({ row, notify });
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(flushMessageQueue, DEBOUNCE_MS);
-    };
-    
+
     const channel = supabase.channel(`macrochat-sync-${realtimeUserId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
-        queueMessage(nextRow, true);
-        if (nextRow.kind !== 'text') void reload();
+        if (!nextRow || isLocallyDeleted(nextRow)) return;
+        realtimeHandlers.current.mergeRealtimeMessage(nextRow, true);
+        if (nextRow.kind !== 'text') void signMediaForRow(nextRow);
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
-        if (!nextRow) return;
-        queueMessage(nextRow, false);
+        if (!nextRow || isLocallyDeleted(nextRow)) return;
+        // Only update messages already in state; never append from an UPDATE.
+        realtimeHandlers.current.mergeRealtimeMessage(nextRow, false, true);
       })
       .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const deleted = change.old as MessageRow;
@@ -1585,22 +1689,44 @@ export function AppProvider({ children }: PropsWithChildren) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'macrochat_message_reactions' }, () => {
         void realtimeHandlers.current.refreshMessageReactions();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'macrochat_conversation_members' }, () => {
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'macrochat_conversation_members' }, () => {
         void reload();
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'macrochat_conversation_members' }, () => {
+        void reload();
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'macrochat_conversation_members' }, (change) => {
+        // Read receipts from the other member: mark my messages at or before their receipt as read.
+        const member = change.new as { conversation_id?: string; user_id?: string; receipt_read_at?: string | null };
+        if (!member.conversation_id || !member.receipt_read_at || member.user_id === realtimeUserId) return;
+        const conversationId = member.conversation_id;
+        const receiptTime = new Date(member.receipt_read_at).getTime();
+        setChats((current) => current.map((chat) => {
+          if (chat.id !== conversationId || chat.isGroup) return chat;
+          return {
+            ...chat,
+            messages: chat.messages.map((message) => (
+              message.senderId === 'me'
+              && message.status !== 'read'
+              && message.status !== 'sending'
+              && message.status !== 'failed'
+              && new Date(message.createdAt).getTime() <= receiptTime
+                ? { ...message, status: 'read' as const }
+                : message
+            )),
+          };
+        }));
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') void reload();
       });
-    // Increased from 8s to 60s to reduce network load; real-time subscriptions handle immediate updates
-    const refreshTimer = setInterval(reload, 60000);
+
+    // Reload only when returning to the foreground if the realtime channel is no longer joined.
     const appStateSubscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') void reload();
+      if (state === 'active' && channel.state !== 'joined') void reload();
     });
 
     return () => {
-      clearInterval(refreshTimer);
-      if (debounceTimer) clearTimeout(debounceTimer);
-      flushMessageQueue(); // Flush any pending messages before cleanup
       appStateSubscription.remove();
       supabase?.removeChannel(channel);
     };
@@ -3085,6 +3211,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     addChat,
     markRead,
     refreshChats: loadChatsFromBackend,
+    loadOlderMessages,
     startAudioCall,
     startVideoCall,
     acceptIncomingCall,
@@ -3163,6 +3290,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     addChat,
     markRead,
     loadChatsFromBackend,
+    loadOlderMessages,
     startAudioCall,
     startVideoCall,
     acceptIncomingCall,

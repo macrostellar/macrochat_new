@@ -1,0 +1,45 @@
+diff --git a/node_modules/expo-modules-core/ios/Core/Events/EventEmitter.swift b/node_modules/expo-modules-core/ios/Core/Events/EventEmitter.swift
+index 3046568..1ea3d18 100644
+--- a/node_modules/expo-modules-core/ios/Core/Events/EventEmitter.swift
++++ b/node_modules/expo-modules-core/ios/Core/Events/EventEmitter.swift
+@@ -23,6 +23,12 @@ public protocol EventEmitter: AnyObject {
+   func withEventTarget<R>(_ body: (borrowing JavaScriptObject) throws -> R) rethrows -> R?
+ }
+ 
++/// Carries a non-`Sendable` emitter across the `@JavaScriptActor` boundary. Declared at file scope
++/// because Swift forbids nesting types inside generic functions.
++private struct SendableEmitterBox: @unchecked Sendable {
++  weak var emitter: AnyObject?
++}
++
+ public extension EventEmitter {
+   /**
+    Schedules an event with the given name to be emitted to the associated JavaScript object.
+@@ -46,10 +52,11 @@ public extension EventEmitter {
+     // safe here because the scheduled closure only calls `withEventTarget`, which touches `@JavaScriptActor`-
+     // isolated or `Sendable` state (the JS object, the registry, `appContext`) and the emitter's identity -
+     // never the module's own mutable state.
+-    nonisolated(unsafe) weak let emitter = self
++    nonisolated(unsafe) weak let emitterWeak = self
++    let wrappedEmitter = SendableEmitterBox(emitter: emitterWeak)
+ 
+     runtime.schedule {
+-      guard let emitter else {
++      guard let emitter = wrappedEmitter.emitter as? Self else {
+         return
+       }
+       let dispatched = emitter.withEventTarget { target in
+@@ -73,10 +80,11 @@ public extension EventEmitter {
+     // See the note in `emit(event:payload:)` above - the emitter is captured as `nonisolated(unsafe)`
+     // because it isn't necessarily `Sendable`, and the scheduled closure only reaches `@JavaScriptActor`-
+     // isolated or `Sendable` state through it.
+-    nonisolated(unsafe) weak let emitter = self
++    nonisolated(unsafe) weak let emitterWeak = self
++    let wrappedEmitter = SendableEmitterBox(emitter: emitterWeak)
+ 
+     runtime.schedule { [weak appContext] in
+-      guard let emitter, let appContext else {
++      guard let emitter = wrappedEmitter.emitter as? Self, let appContext else {
+         return
+       }
+       let jsPayload: JavaScriptValue

@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import { Alert, Animated, Dimensions, FlatList, Image, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { router } from 'expo-router';
-import { Video, ResizeMode } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { Avatar } from '@/components/Avatar';
 import { MessageTimerBorder } from '@/components/MessageTimerBorder';
-import { VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
+import { VideoPreviewPlayer, VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
 import { useApp } from '@/context/AppContext';
+import { useApprovals } from '@/context/ApprovalsContext';
 import { presenceLabelForDisplay } from '@/lib/useChatActivity';
 import { STICKER_LIST } from '@/lib/stickers';
 import { colors } from '@/theme/colors';
@@ -346,6 +346,7 @@ function Conversation({ chat }: { chat: Chat }) {
     sendMediaMessage,
     sendChatActivity,
     markRead,
+    loadOlderMessages,
     signalingEnabled,
     signalingReady,
     startAudioCall,
@@ -453,6 +454,17 @@ function Conversation({ chat }: { chat: Chat }) {
   const activity = activityByChat[chat.id];
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [manualActivityState, setManualActivityState] = useState<'recording' | 'screenshot' | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+
+  const handleLoadOlder = async () => {
+    if (loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      await loadOlderMessages(chat.id);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
   const activityLabel = activity
     ? activity.state === 'typing'
       ? 'typing...'
@@ -1169,6 +1181,11 @@ function Conversation({ chat }: { chat: Chat }) {
         data={filteredMessages}
         inverted
         ListHeaderComponent={pinnedHeader}
+        ListFooterComponent={chat.hasOlderMessages ? (
+          <Pressable style={styles.loadOlderButton} onPress={handleLoadOlder} disabled={loadingOlder}>
+            <Text style={styles.loadOlderText}>{loadingOlder ? 'Loading...' : 'Load older messages'}</Text>
+          </Pressable>
+        ) : null}
         keyExtractor={(item) => item.clientId ?? item.id}
         style={styles.messageList}
         contentContainerStyle={styles.messageContent}
@@ -1457,12 +1474,9 @@ function Conversation({ chat }: { chat: Chat }) {
             <>
               <View style={[styles.mediaModalFrame, { maxWidth: modalMaxWidth, maxHeight: modalMaxHeight }]}>
                 {previewMedia && previewMedia.kind === 'video' ? (
-                  <Video
-                    source={{ uri: previewMedia.uri }}
+                  <VideoPreviewPlayer
+                    uri={previewMedia.uri}
                     style={[styles.mediaModalContent, { width: '100%', height: '100%', aspectRatio: previewMedia.aspectRatio || 16 / 9 }]}
-                    resizeMode={ResizeMode.CONTAIN}
-                    useNativeControls
-                    isLooping={false}
                   />
                 ) : previewMedia && (
                   <Image source={{ uri: previewMedia.uri }} style={styles.mediaModalImage} resizeMode="contain" />
@@ -1704,10 +1718,14 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
   }, []);
 
   const { chats, profile, pinChat, muteChat, markChatUnread, clearChat, blockContact, deleteChat, activityByChat } = useApp();
+  const { pendingForMe: pendingApprovals } = useApprovals();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'unread' | 'groups'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(initialChatId ?? null);
   const [activeContextMenu, setActiveContextMenu] = useState<string | null>(null);
+  const renderChatCell = useCallback(({ item, style, onLayout, children }: ComponentProps<NonNullable<ComponentProps<typeof FlatList<Chat>>['CellRendererComponent']>>) => (
+    <View onLayout={onLayout} style={[style, activeContextMenu === item.id && styles.chatCellMenuOpen]}>{children}</View>
+  ), [activeContextMenu]);
 
   const filtered = useMemo(() => {
     return chats
@@ -1761,6 +1779,10 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
         <View style={styles.railNav}>
           <Pressable accessibilityLabel="Chats" style={[styles.railButton, styles.railActive]}><Ionicons name="chatbubble-ellipses" size={22} color={colors.neon} /></Pressable>
           <Pressable accessibilityLabel="Updates" style={styles.railButton} onPress={() => router.push('/updates')}><Ionicons name="radio-outline" size={22} color={colors.muted} /></Pressable>
+          <Pressable accessibilityLabel="Approvals" style={styles.railButton} onPress={() => router.push('/approvals')}>
+            <Ionicons name="checkmark-done-circle-outline" size={22} color={colors.muted} />
+            {pendingApprovals > 0 && <View style={styles.railBadge}><Text style={styles.railBadgeText}>{pendingApprovals > 9 ? '9+' : pendingApprovals}</Text></View>}
+          </Pressable>
           <Pressable accessibilityLabel="Calls" style={styles.railButton} onPress={() => router.push('/calls')}><Ionicons name="call-outline" size={21} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="People" style={styles.railButton} onPress={() => router.push('/people')}><Ionicons name="people-outline" size={22} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="Settings" style={styles.railButton} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={22} color={colors.muted} /></Pressable>
@@ -1795,6 +1817,7 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
           data={filtered}
           keyExtractor={(item) => item.id}
           style={styles.chatList}
+          CellRendererComponent={renderChatCell}
           ListEmptyComponent={<Text style={styles.empty}>No conversations found</Text>}
           renderItem={({ item }) => {
             const last = item.messages[item.messages.length - 1];
@@ -1931,6 +1954,8 @@ const styles = StyleSheet.create({
   logoText: { color: colors.navy950, fontSize: 20, fontWeight: '900' },
   railNav: { flex: 1, paddingTop: 28, gap: 8 },
   railButton: { width: 44, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  railBadge: { position: 'absolute', right: -2, top: -2, minWidth: 18, height: 18, borderRadius: 9, backgroundColor: colors.danger, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  railBadgeText: { color: colors.white, fontSize: 9, fontWeight: '900' },
   railActive: { backgroundColor: colors.navy800, borderLeftWidth: 2, borderLeftColor: colors.neon },
   profileAvatar: { marginTop: 10 },
   sidebar: { width: 390, maxWidth: '34%', backgroundColor: colors.navy900, borderRightWidth: 1, borderRightColor: colors.border, zIndex: 30, overflow: 'visible' },
@@ -1951,6 +1976,7 @@ const styles = StyleSheet.create({
   chatRow: { position: 'relative', minHeight: 72, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 13, zIndex: 1, overflow: 'visible', elevation: 1 },
   chatRowActive: { backgroundColor: colors.navy800, borderLeftWidth: 3, borderLeftColor: colors.neon, paddingLeft: 10, zIndex: 2, elevation: 2 },
   chatRowMenuOpen: { zIndex: 9999999, elevation: 9999999 },
+  chatCellMenuOpen: { position: 'relative', zIndex: 1000 },
   chatCopy: { flex: 1, minWidth: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, paddingVertical: 14, position: 'relative', zIndex: 1 },
   chatCopyMenuOpen: { zIndex: 9999999, elevation: 9999999 },
   chatLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -1987,8 +2013,10 @@ const styles = StyleSheet.create({
   headerAction: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
   encryption: { position: 'absolute', top: 80, zIndex: 2, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, height: 25, borderRadius: 5, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border },
   encryptionText: { color: colors.muted, fontSize: 9 },
-  pinnedBanner: { position: 'relative', zIndex: 25, marginHorizontal: 12, marginTop: 8, marginBottom: 0, borderRadius: 10, backgroundColor: colors.navy900, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 9, flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: 'rgba(0,0,0,0.2)', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  pinnedBanner: { position: 'relative', zIndex: 25, marginHorizontal: 12, marginTop: 8, marginBottom: 0, borderRadius: 10, backgroundColor: colors.navy900, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, paddingVertical: 9, flexDirection: 'row', alignItems: 'center', gap: 8, boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)', elevation: 3 },
   pinnedBannerText: { flex: 1, color: colors.white, fontSize: 12, fontWeight: '700' },
+  loadOlderButton: { alignSelf: 'center', marginVertical: 10, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.navy900, paddingHorizontal: 14, paddingVertical: 6 },
+  loadOlderText: { color: colors.white, fontSize: 12, fontWeight: '700' },
   messageList: { flex: 1, zIndex: 1 },
   messageSearchBar: { position: 'absolute', top: 68, left: 0, right: 0, zIndex: 40, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: 'rgba(10, 19, 30, 0.97)', borderBottomWidth: 1, borderBottomColor: colors.border, overflow: 'hidden' },
   messageSearchRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -2008,19 +2036,16 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(148, 174, 205, 0.18)',
     backgroundColor: 'rgba(17, 34, 51, 0.72)',
     overflow: 'visible',
-    shadowColor: 'rgba(0, 0, 0, 0.18)',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.045)',
     elevation: 1,
     flexShrink: 1,
     minWidth: 0,
   },
-  bubbleActive: { borderColor: 'rgba(148, 174, 205, 0.26)', shadowOpacity: 0.18 },
-  replyJumpFlash: { borderColor: 'rgba(120, 214, 255, 0.9)', shadowColor: 'rgba(120, 214, 255, 0.8)', shadowOpacity: 0.95, shadowRadius: 14, elevation: 8 },
+  bubbleActive: { borderColor: 'rgba(148, 174, 205, 0.26)', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.032)' },
+  replyJumpFlash: { borderColor: 'rgba(120, 214, 255, 0.9)', boxShadow: '0 0 14px rgba(120, 214, 255, 0.76)', elevation: 8 },
   mine: { backgroundColor: 'rgba(26, 62, 87, 0.72)', borderColor: 'rgba(135, 170, 210, 0.2)', borderBottomRightRadius: 6 },
   theirs: { backgroundColor: 'rgba(14, 25, 36, 0.74)', borderColor: 'rgba(135, 170, 210, 0.14)', borderBottomLeftRadius: 6 },
-  stickerBubble: { backgroundColor: 'transparent', borderWidth: 0, padding: 0, borderRadius: 0, overflow: 'visible', shadowOpacity: 0, elevation: 0 },
+  stickerBubble: { backgroundColor: 'transparent', borderWidth: 0, padding: 0, borderRadius: 0, overflow: 'visible', boxShadow: 'none', elevation: 0 },
   messageText: { color: colors.white, fontSize: 14, lineHeight: 20, flexShrink: 1 },
   replyPreview: { paddingVertical: 4, marginBottom: 6, borderLeftWidth: 2, borderLeftColor: colors.neon, paddingLeft: 8, maxWidth: '100%' },
   replyPreviewText: { color: colors.neon, fontSize: 10, fontWeight: '700', flexShrink: 1, lineHeight: 14 },

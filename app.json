@@ -40,7 +40,9 @@
           "cameraPermission": "MacroChat uses the camera to capture photos and videos.",
           "microphonePermission": "MacroChat uses the microphone when recording video."
         }
-      ]
+      ],
+      "expo-audio",
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true

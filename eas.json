@@ -5,12 +5,21 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "ios": {
+        "simulator": true
+      }
     },
     "preview": {
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "ios": {
+        "simulator": false
       }
     },
     "production": {
@@ -18,10 +27,16 @@
       "android": {
         "buildType": "app-bundle"
       },
+      "ios": {
+        "simulator": false
+      },
       "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "https://your-supabase-url.supabase.co",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "your-anon-key",
-        "EXPO_PUBLIC_SIGNALING_URL": "wss://your-signaling-server.com"
+        "EXPO_PUBLIC_SUPABASE_URL": "https://pofbkteiymgiwciamyll.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBvZmJrdGVpeW1naXdjaWFteWxsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyNTM0MDEsImV4cCI6MjA5NjgyOTQwMX0.AHHg2WKLM86k-K0Sr0BMgX4oGQmukYkaYs-n2rAGsPQ",
+        "EXPO_PUBLIC_SIGNALING_URL": "https://pleasing-purpose-production-e16f.up.railway.app",
+        "EXPO_PUBLIC_TURN_URL": "turn:51.20.193.53:3478",
+        "EXPO_PUBLIC_TURN_USERNAME": "macrochat",
+        "EXPO_PUBLIC_TURN_CREDENTIAL": "macrochat123"
       }
     }
   },
@@ -29,6 +44,9 @@
     "production": {
       "android": {
         "track": "internal"
+      },
+      "ios": {
+        "ascAppId": "YOUR_APP_ID"
       }
     }
   }

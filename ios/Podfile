@@ -21,7 +21,6 @@ ENV['RCT_HERMES_V1_ENABLED'] ||= '0' if podfile_properties['expo.useHermesV1'] =
 # An explicit `ios.usePrecompiledModules: false` must win even when the env var is already set
 # (e.g. EXPO_USE_PRECOMPILED_MODULES exported by EAS Build), so force-disable here before the default.
 ENV['EXPO_USE_PRECOMPILED_MODULES'] = '0' if podfile_properties['EXPO_USE_PRECOMPILED_MODULES'] == 'false'
-ENV['EXPO_USE_PRECOMPILED_MODULES'] ||= '1'
 platform :ios, podfile_properties['ios.deploymentTarget'] || '16.4'
 
 prepare_react_native_project!
@@ -66,10 +65,40 @@ target 'MacroChat' do
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
 
+    # Disable Swift concurrency checking for ExpoModulesJSI to allow unsafe pointers in actor-isolated callbacks
     installer.pods_project.targets.each do |target|
+      if target.name == 'ExpoModulesJSI'
+        target.build_configurations.each do |config|
+          config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'none'
+          config.build_settings['SWIFT_ACTOR_ISOLATION_CHECK'] = 'off'
+          # Suppress concurrency warnings
+          config.build_settings['GCC_WARN_INHIBIT_ALL_WARNINGS'] = 'YES'
+        end
+      else
+        target.build_configurations.each do |config|
+          config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'none'
+        end
+      end
+      # rsync in the xcframework copy phases needs to read/write outside the script sandbox.
       target.build_configurations.each do |config|
-        config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'none'
+        config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
       end
     end
+
+    # The app target embeds the Expo xcframeworks via rsync, which the script sandbox blocks.
+    installer.aggregate_targets.each do |aggregate_target|
+      user_project = aggregate_target.user_project
+      next unless user_project
+
+      user_project.targets.each do |target|
+        target.build_configurations.each do |config|
+          config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
+        end
+      end
+      user_project.save
+    end
+
+    # Save the project to apply changes
+    installer.pods_project.save
   end
 end

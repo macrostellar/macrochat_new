@@ -135,6 +135,7 @@ export type Chat = {
   muted?: boolean;
   disappearingSeconds?: number | null;
   messages: Message[];
+  hasOlderMessages?: boolean;
 };
 
 export type UpdateReaction = {
@@ -171,4 +172,101 @@ export type MessageComment = {
   userDisplayName: string;
   text: string;
   createdAt: string;
+};
+
+export type ApprovalRole = 'approver' | 'submitter';
+export type ApprovalMode = 'all' | 'any';
+export type ApprovalContentKind = 'text' | 'email' | 'image' | 'video' | 'file';
+export type ApprovalDecisionKind = 'approved' | 'rejected' | 'changes';
+export type ApprovalStatus = 'pending' | ApprovalDecisionKind | 'cancelled';
+
+export type ApprovalOption = { id: string; label: string };
+
+export type ApprovalMember = {
+  userId: string;
+  displayName: string;
+  macroId: string;
+  avatarColor: string;
+  avatarUrl?: string;
+  role: ApprovalRole;
+};
+
+export type ApprovalGroup = {
+  /** Same as the backing group conversation id. */
+  id: string;
+  name: string;
+  category: string;
+  approvalMode: ApprovalMode;
+  createdBy: string;
+  createdAt: string;
+  members: ApprovalMember[];
+  myRole: ApprovalRole | null;
+  isOwner: boolean;
+};
+
+export type ApprovalDecision = {
+  id: string;
+  requestId: string;
+  approverId: string;
+  approverName: string;
+  decision: ApprovalDecisionKind;
+  selectedOptions: string[];
+  comment?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ApprovalRequest = {
+  id: string;
+  groupId: string;
+  groupName: string;
+  groupCategory: string;
+  requesterId: string;
+  requesterName: string;
+  requesterAvatarColor: string;
+  title: string;
+  contentKind: ApprovalContentKind;
+  body?: string;
+  mediaPath?: string;
+  mediaUrl?: string;
+  fileName?: string;
+  mimeType?: string;
+  approveOptions: ApprovalOption[];
+  approveMulti: boolean;
+  rejectOptions: ApprovalOption[];
+  rejectMulti: boolean;
+  dueAt?: string;
+  status: ApprovalStatus;
+  createdAt: string;
+  editedAt?: string;
+  resolvedAt?: string;
+  decisions: ApprovalDecision[];
+  /** Approvers who are expected to decide (requester excluded). */
+  approverIds: string[];
+  mine: boolean;
+  myDecision?: ApprovalDecision;
+  /** True when I am an approver on an open request and have not decided yet. */
+  awaitingMe: boolean;
+};
+
+export type NewApprovalRequestInput = {
+  groupId: string;
+  title: string;
+  contentKind: ApprovalContentKind;
+  body?: string;
+  /** New file to upload; omit to keep the existing attachment when editing. */
+  media?: { uri: string; fileName?: string; mimeType?: string };
+  /** When editing, set to drop the current attachment. */
+  removeMedia?: boolean;
+  approveOptions: string[];
+  approveMulti: boolean;
+  rejectOptions: string[];
+  rejectMulti: boolean;
+  dueAt?: string;
+};
+
+export type ApprovalDecisionInput = {
+  decision: ApprovalDecisionKind;
+  selectedOptions: string[];
+  comment?: string;
 };

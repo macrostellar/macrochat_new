@@ -6,14 +6,16 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import { Avatar, DEFAULT_PROFILE_AVATARS } from '@/components/Avatar';
+import { ApprovalGroupDetail, ApprovalGroupRow, ApprovalRequestDetail, ApprovalRequestRow, ApprovalTabs, DecisionSheet, HistoryFilterBar, NewApprovalGroupForm, NewApprovalRequestForm, defaultHistoryFilters, useFilteredApprovals, type ApprovalTab, type HistoryFilters } from '@/components/ApprovalViews';
 import { CallMedia } from '@/components/CallMedia';
 import { SignOutModal } from '@/components/SignOutModal';
 import { useApp } from '@/context/AppContext';
+import { useApprovals } from '@/context/ApprovalsContext';
 import { copyToClipboard } from '@/lib/id';
 import { colors } from '@/theme/colors';
-import type { Chat } from '@/types';
+import type { ApprovalDecisionKind, ApprovalRequest, Chat } from '@/types';
 
-type Section = 'updates' | 'calls' | 'people' | 'settings';
+type Section = 'updates' | 'approvals' | 'calls' | 'people' | 'settings';
 
 function timeAgo(iso: string) {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -46,10 +48,12 @@ const settingsItems: { id: string; icon: keyof typeof Ionicons.glyphMap; title: 
 
 function WebRail({ active }: { active: Section | 'chats' }) {
   const { profile, updates } = useApp();
+  const { pendingForMe } = useApprovals();
   const unreadStatusCount = updates.filter((item) => !item.mine && !item.viewed).length;
-  const links: { id: Section | 'chats'; icon: keyof typeof Ionicons.glyphMap; route: '/(tabs)' | '/updates' | '/calls' | '/people' | '/(tabs)/settings' }[] = [
+  const links: { id: Section | 'chats'; icon: keyof typeof Ionicons.glyphMap; route: '/(tabs)' | '/updates' | '/approvals' | '/calls' | '/people' | '/(tabs)/settings'; badge?: number }[] = [
     { id: 'chats', icon: 'chatbubble-ellipses', route: '/(tabs)' },
-    { id: 'updates', icon: 'radio-outline', route: '/updates' },
+    { id: 'updates', icon: 'radio-outline', route: '/updates', badge: unreadStatusCount },
+    { id: 'approvals', icon: 'checkmark-done-circle-outline', route: '/approvals', badge: pendingForMe },
     { id: 'calls', icon: 'call-outline', route: '/calls' },
     { id: 'people', icon: 'people-outline', route: '/people' },
     { id: 'settings', icon: 'settings-outline', route: '/(tabs)/settings' },
@@ -62,8 +66,8 @@ function WebRail({ active }: { active: Section | 'chats' }) {
         {links.map((item) => (
           <Pressable key={item.id} accessibilityLabel={item.id} style={[styles.railButton, active === item.id && styles.railActive]} onPress={() => router.push(item.route)}>
             <Ionicons name={item.icon} size={22} color={active === item.id ? colors.neon : colors.muted} />
-            {item.id === 'updates' && unreadStatusCount > 0 && (
-              <View style={styles.tabBadge}><Text style={styles.tabBadgeText}>{unreadStatusCount > 9 ? '9+' : unreadStatusCount}</Text></View>
+            {Boolean(item.badge) && (
+              <View style={styles.tabBadge}><Text style={styles.tabBadgeText}>{item.badge! > 9 ? '9+' : item.badge}</Text></View>
             )}
           </Pressable>
         ))}
@@ -503,6 +507,115 @@ export function WebNewChat({ macroId, onChangeMacroId, onStart, starting }: { ma
   );
 }
 
+type ApprovalsPane =
+  | { mode: 'empty' }
+  | { mode: 'request'; id: string }
+  | { mode: 'edit'; id: string }
+  | { mode: 'group'; id: string }
+  | { mode: 'new'; groupId?: string }
+  | { mode: 'new-group' };
+
+export function WebApprovals({ initialRequestId, initialGroupId, initialMode }: { initialRequestId?: string; initialGroupId?: string; initialMode?: 'new' | 'new-group' | 'group' | 'edit' }) {
+  const { loading, requests } = useApprovals();
+  const [tab, setTab] = useState<ApprovalTab>(initialMode === 'group' ? 'groups' : 'inbox');
+  const [query, setQuery] = useState('');
+  const [filters, setFilters] = useState<HistoryFilters>(defaultHistoryFilters);
+  const [pane, setPane] = useState<ApprovalsPane>(() => {
+    if (initialMode === 'edit' && initialRequestId) return { mode: 'edit', id: initialRequestId };
+    if (initialRequestId) return { mode: 'request', id: initialRequestId };
+    if (initialMode === 'group' && initialGroupId) return { mode: 'group', id: initialGroupId };
+    if (initialMode === 'new') return { mode: 'new', groupId: initialGroupId };
+    if (initialMode === 'new-group') return { mode: 'new-group' };
+    return { mode: 'empty' };
+  });
+  const [quick, setQuick] = useState<{ request: ApprovalRequest; kind: ApprovalDecisionKind } | null>(null);
+  const { sections, groups } = useFilteredApprovals(tab, query, filters);
+
+  const openRequest = (id: string) => setPane({ mode: 'request', id });
+  const openGroup = (id: string) => setPane({ mode: 'group', id });
+  const activeId = pane.mode === 'request' || pane.mode === 'group' || pane.mode === 'edit' ? pane.id : undefined;
+  const editingRequest = pane.mode === 'edit' ? requests.find((request) => request.id === pane.id) : undefined;
+
+  return (
+    <Workspace
+      active="approvals"
+      title="Approvals"
+      subtitle="One-tap sign-off for posts, emails, media, and files."
+      action={(
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <Pressable accessibilityLabel="New approval group" style={styles.secondaryIcon} onPress={() => setPane({ mode: 'new-group' })}><Ionicons name="people-outline" size={20} color={colors.white} /></Pressable>
+          <Pressable accessibilityLabel="New approval request" style={styles.primaryIcon} onPress={() => setPane({ mode: 'new' })}><Ionicons name="add" size={22} color={colors.navy950} /></Pressable>
+        </View>
+      )}
+      sidebar={(
+        <>
+          <ApprovalTabs tab={tab} onChange={setTab} />
+          <Search value={query} onChangeText={setQuery} placeholder={tab === 'groups' ? 'Search groups' : tab === 'history' ? 'Search old approvals' : 'Search requests'} />
+          {tab === 'history' && <View style={{ marginTop: 8 }}><HistoryFilterBar filters={filters} onChange={setFilters} /></View>}
+          {tab === 'groups' ? (
+            <FlatList
+              data={groups}
+              keyExtractor={(item) => item.id}
+              ListEmptyComponent={<Text style={styles.emptyList}>{loading ? 'Loading…' : 'No approval groups yet. Create one with 2+ people.'}</Text>}
+              renderItem={({ item }) => <ApprovalGroupRow group={item} active={activeId === item.id} onPress={() => openGroup(item.id)} />}
+            />
+          ) : (
+            <FlatList
+              data={sections.flatMap((section) => [{ header: section.title } as const, ...section.data])}
+              keyExtractor={(item) => ('header' in item ? `h-${item.header}` : item.id)}
+              ListEmptyComponent={<Text style={styles.emptyList}>{loading ? 'Loading…' : tab === 'inbox' ? 'Nothing waiting on you.' : tab === 'history' ? 'No decided requests match these filters.' : 'Nothing waiting for a decision.'}</Text>}
+              renderItem={({ item }) => ('header' in item
+                ? <Text style={styles.sectionLabel}>{item.header}</Text>
+                : <ApprovalRequestRow request={item} active={activeId === item.id} onPress={() => openRequest(item.id)} onQuickDecide={(kind) => setQuick({ request: item, kind })} />)}
+            />
+          )}
+          <DecisionSheet request={quick?.request ?? null} kind={quick?.kind ?? 'approved'} visible={quick !== null} onClose={() => setQuick(null)} />
+        </>
+      )}
+    >
+      {pane.mode === 'empty' && <EmptyDetail icon="checkmark-done-circle-outline" title="Approvals" text="Pick a request to review it, or send something new for sign-off." />}
+      {pane.mode === 'request' && <ApprovalRequestDetail requestId={pane.id} onOpenGroup={openGroup} onEdit={(id) => setPane({ mode: 'edit', id })} />}
+      {pane.mode === 'edit' && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.subpageHeader}>
+            <Pressable accessibilityLabel="Back" style={styles.subpageBack} onPress={() => openRequest(pane.id)}><Ionicons name="chevron-back" size={21} color={colors.white} /></Pressable>
+            <View><Text style={styles.subpageTitle}>Edit request</Text><Text style={styles.subpageSubtitle}>Update it before approvers decide</Text></View>
+          </View>
+          {editingRequest
+            ? <NewApprovalRequestForm key={editingRequest.id} editRequest={editingRequest} onDone={openRequest} />
+            : <EmptyDetail icon="document-outline" title="Request not found" text="It may have been withdrawn." />}
+        </View>
+      )}
+      {pane.mode === 'group' && (
+        <ApprovalGroupDetail
+          groupId={pane.id}
+          onNewRequest={() => setPane({ mode: 'new', groupId: pane.id })}
+          onOpenChat={() => router.push({ pathname: '/chat/[id]', params: { id: pane.id } })}
+          onOpenRequest={openRequest}
+        />
+      )}
+      {pane.mode === 'new' && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.subpageHeader}>
+            <Pressable accessibilityLabel="Close" style={styles.subpageBack} onPress={() => setPane({ mode: 'empty' })}><Ionicons name="close" size={21} color={colors.white} /></Pressable>
+            <View><Text style={styles.subpageTitle}>New request</Text><Text style={styles.subpageSubtitle}>Send something for sign-off</Text></View>
+          </View>
+          <NewApprovalRequestForm initialGroupId={pane.groupId} onDone={(id) => { setTab('sent'); openRequest(id); }} onCreateGroup={() => setPane({ mode: 'new-group' })} />
+        </View>
+      )}
+      {pane.mode === 'new-group' && (
+        <View style={{ flex: 1 }}>
+          <View style={styles.subpageHeader}>
+            <Pressable accessibilityLabel="Close" style={styles.subpageBack} onPress={() => setPane({ mode: 'empty' })}><Ionicons name="close" size={21} color={colors.white} /></Pressable>
+            <View><Text style={styles.subpageTitle}>New approval group</Text><Text style={styles.subpageSubtitle}>Two or more people, at least one approver</Text></View>
+          </View>
+          <NewApprovalGroupForm onDone={(id) => { setTab('groups'); openGroup(id); }} />
+        </View>
+      )}
+    </Workspace>
+  );
+}
+
 export function WebSettingsShell({ activeId, title, subtitle, children }: { activeId: string; title: string; subtitle: string; children: React.ReactNode }) {
   const { profile, backendMode } = useApp();
   const [query, setQuery] = useState('');
@@ -670,6 +783,7 @@ const styles = StyleSheet.create({
   sidebarTitle: { color: colors.white, fontSize: 24, fontWeight: '900', marginTop: 2 },
   sidebarSubtitle: { color: colors.muted, fontSize: 11, lineHeight: 16, paddingHorizontal: 18, marginTop: -9, marginBottom: 12 },
   primaryIcon: { width: 38, height: 38, borderRadius: 8, backgroundColor: colors.neon, alignItems: 'center', justifyContent: 'center' },
+  secondaryIcon: { width: 38, height: 38, borderRadius: 8, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   connectionDot: { width: 9, height: 9, borderRadius: 5, marginRight: 8 },
   search: { height: 42, marginHorizontal: 12, backgroundColor: colors.navy800, borderRadius: 7, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
   searchInput: { flex: 1, color: colors.white, fontSize: 13 },
