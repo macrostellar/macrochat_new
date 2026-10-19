@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Image, Text, View } from 'react-native';
 import { colors } from '@/theme/colors';
 
@@ -16,12 +17,14 @@ export const DEFAULT_PROFILE_AVATARS = [
 
 export function Avatar({ name, color, size = 48, online = false, imageUrl }: { name: string; color: string; size?: number; online?: boolean; imageUrl?: string }) {
   const initials = name.split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase() || 'M';
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const showImage = Boolean(imageUrl) && failedUrl !== imageUrl;
 
   return (
     <View style={{ width: size, height: size }}>
       <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: color, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-        {imageUrl ? (
-          <Image source={{ uri: imageUrl }} style={{ width: size, height: size, borderRadius: size / 2 }} resizeMode="cover" />
+        {showImage ? (
+          <Image source={{ uri: imageUrl }} style={{ width: size, height: size, borderRadius: size / 2 }} resizeMode="cover" onError={() => setFailedUrl(imageUrl ?? null)} />
         ) : (
           <Text style={{ color: colors.navy950, fontSize: size * 0.36, fontWeight: '800' }}>{initials}</Text>
         )}

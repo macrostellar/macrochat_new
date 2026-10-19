@@ -265,6 +265,9 @@ create policy "owners update approval members" on public.macrochat_approval_memb
 drop policy if exists "owners remove approval members" on public.macrochat_approval_members;
 create policy "owners remove approval members" on public.macrochat_approval_members for delete to authenticated
   using (public.macrochat_is_approval_group_owner(conversation_id) or user_id = auth.uid());
+drop policy if exists "owners remove group chat members" on public.macrochat_conversation_members;
+create policy "owners remove group chat members" on public.macrochat_conversation_members for delete to authenticated
+  using (public.macrochat_is_approval_group_owner(conversation_id) and user_id <> auth.uid());
 
 drop policy if exists "members read approval requests" on public.macrochat_approval_requests;
 create policy "members read approval requests" on public.macrochat_approval_requests for select to authenticated

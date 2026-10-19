@@ -98,20 +98,6 @@ function parseStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
-export function buildDecisionSummary(actorName: string, request: Pick<ApprovalRequest, 'title'>, input: ApprovalDecisionInput, finalStatus?: ApprovalStatus) {
-  const parts = [`${decisionEmoji[input.decision]} ${actorName} ${input.decision === 'changes' ? 'requested changes on' : input.decision} \u201C${request.title}\u201D`];
-  if (input.selectedOptions.length > 0) parts.push(input.selectedOptions.join(', '));
-  if (input.comment?.trim()) parts.push(`\u201C${input.comment.trim()}\u201D`);
-  const line = parts.join(' \u00B7 ');
-  if (finalStatus === 'approved' && input.decision === 'approved') return `${line}\nAll approvals in \u2014 request approved.`;
-  return line;
-}
-
-export function buildRequestSummary(actorName: string, title: string, contentKind: ApprovalContentKind) {
-  const kindLabel: Record<ApprovalContentKind, string> = { text: 'a post', email: 'an email draft', image: 'an image', video: 'a video', file: 'a file' };
-  return `\uD83D\uDCCB ${actorName} sent ${kindLabel[contentKind]} for approval: \u201C${title}\u201D`;
-}
-
 async function currentUserId(client: Client) {
   const { data } = await client.auth.getSession();
   const id = data.session?.user.id;
@@ -140,18 +126,6 @@ async function readUploadBody(uri: string): Promise<Blob | Uint8Array> {
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
-}
-
-export async function postApprovalSystemMessage(client: Client, conversationId: string, senderId: string, text: string) {
-  const clientId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const { error } = await client.from('macrochat_messages').insert({
-    conversation_id: conversationId,
-    sender_id: senderId,
-    body: text.slice(0, 4000),
-    kind: 'system',
-    client_id: clientId,
-  });
-  if (error) console.warn('Failed to post approval event to chat:', error.message);
 }
 
 export type ApprovalSnapshot = { groups: ApprovalGroup[]; requests: ApprovalRequest[] };
@@ -313,7 +287,6 @@ export async function createApprovalGroupRemote(client: Client, input: { name: s
   ]);
   if (rolesInsert.error) throw rolesInsert.error;
 
-  await postApprovalSystemMessage(client, conversationId, me, `\uD83D\uDEE1\uFE0F Approval group \u201C${name}\u201D created \u00B7 ${input.approvalMode === 'all' ? 'all approvers must approve' : 'any one approver can approve'}`);
   return conversationId;
 }
 
@@ -337,6 +310,8 @@ export async function updateApprovalMembersRemote(client: Client, groupId: strin
   if (changes.remove?.length) {
     const res = await client.from('macrochat_approval_members').delete().eq('conversation_id', groupId).in('user_id', changes.remove);
     if (res.error) throw res.error;
+    const chat = await client.from('macrochat_conversation_members').delete().eq('conversation_id', groupId).in('user_id', changes.remove);
+    if (chat.error) throw chat.error;
   }
 }
 
@@ -349,7 +324,7 @@ async function uploadApprovalMedia(client: Client, groupId: string, me: string, 
   return { media_path: path, media_name: media.fileName || null, media_mime: mime };
 }
 
-export async function createApprovalRequestRemote(client: Client, actorName: string, input: NewApprovalRequestInput) {
+export async function createApprovalRequestRemote(client: Client, input: NewApprovalRequestInput) {
   const me = await currentUserId(client);
   const media = input.media ? await uploadApprovalMedia(client, input.groupId, me, input.media) : { media_path: null, media_name: null, media_mime: null };
 
@@ -367,12 +342,10 @@ export async function createApprovalRequestRemote(client: Client, actorName: str
     due_at: input.dueAt || null,
   }).select('id').single();
   if (insert.error) throw insert.error;
-
-  await postApprovalSystemMessage(client, input.groupId, me, buildRequestSummary(actorName, input.title.trim(), input.contentKind));
   return insert.data.id as string;
 }
 
-export async function updateApprovalRequestRemote(client: Client, actorName: string, request: ApprovalRequest, input: NewApprovalRequestInput) {
+export async function updateApprovalRequestRemote(client: Client, request: ApprovalRequest, input: NewApprovalRequestInput) {
   const me = await currentUserId(client);
   const media = input.media
     ? await uploadApprovalMedia(client, request.groupId, me, input.media)
@@ -390,12 +363,9 @@ export async function updateApprovalRequestRemote(client: Client, actorName: str
     due_at: input.dueAt || null,
   }).eq('id', request.id).eq('requester_id', me);
   if (res.error) throw res.error;
-
-  const hadDecisions = request.decisions.length > 0;
-  await postApprovalSystemMessage(client, request.groupId, me, `\u270F\uFE0F ${actorName} edited \u201C${input.title.trim()}\u201D${hadDecisions ? ' \u00B7 earlier decisions were reset, please review again' : ''}`);
 }
 
-export async function submitApprovalDecisionRemote(client: Client, actorName: string, request: ApprovalRequest, input: ApprovalDecisionInput) {
+export async function submitApprovalDecisionRemote(client: Client, request: ApprovalRequest, input: ApprovalDecisionInput) {
   const me = await currentUserId(client);
   const upsert = await client.from('macrochat_approval_decisions').upsert({
     request_id: request.id,
@@ -407,14 +377,11 @@ export async function submitApprovalDecisionRemote(client: Client, actorName: st
   if (upsert.error) throw upsert.error;
 
   const refreshed = await client.from('macrochat_approval_requests').select('status').eq('id', request.id).maybeSingle();
-  const finalStatus = (refreshed.data?.status as ApprovalStatus | undefined) ?? request.status;
-  await postApprovalSystemMessage(client, request.groupId, me, buildDecisionSummary(actorName, request, input, finalStatus));
-  return finalStatus;
+  return (refreshed.data?.status as ApprovalStatus | undefined) ?? request.status;
 }
 
-export async function cancelApprovalRequestRemote(client: Client, actorName: string, request: ApprovalRequest) {
+export async function cancelApprovalRequestRemote(client: Client, request: ApprovalRequest) {
   const me = await currentUserId(client);
   const res = await client.from('macrochat_approval_requests').update({ status: 'cancelled', resolved_at: new Date().toISOString() }).eq('id', request.id).eq('requester_id', me);
   if (res.error) throw res.error;
-  await postApprovalSystemMessage(client, request.groupId, me, `\uD83D\uDEAB ${actorName} withdrew \u201C${request.title}\u201D`);
 }

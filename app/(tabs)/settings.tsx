@@ -52,8 +52,12 @@ export default function SettingsScreen() {
     });
 
     if (!result.canceled && result.assets[0]) {
-      await updateProfilePicture(result.assets[0].uri);
-      Alert.alert('Profile picture updated');
+      try {
+        await updateProfilePicture(result.assets[0].uri, result.assets[0].mimeType ?? undefined);
+        Alert.alert('Profile picture updated');
+      } catch (error) {
+        Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+      }
     }
   };
 
@@ -180,7 +184,13 @@ export default function SettingsScreen() {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.avatarScrollContainer}>
             <View style={styles.defaultAvatarRow}>
               {DEFAULT_PROFILE_AVATARS.map((url) => (
-                <Pressable key={url} onPress={async () => { await updateProfilePicture(url); }}>
+                <Pressable key={url} onPress={async () => {
+                  try {
+                    await updateProfilePicture(url);
+                  } catch (error) {
+                    Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+                  }
+                }}>
                   <Avatar name={profile.displayName} color={profile.avatarColor} size={40} imageUrl={url} />
                 </Pressable>
               ))}

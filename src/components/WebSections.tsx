@@ -52,8 +52,8 @@ function WebRail({ active }: { active: Section | 'chats' }) {
   const unreadStatusCount = updates.filter((item) => !item.mine && !item.viewed).length;
   const links: { id: Section | 'chats'; icon: keyof typeof Ionicons.glyphMap; route: '/(tabs)' | '/updates' | '/approvals' | '/calls' | '/people' | '/(tabs)/settings'; badge?: number }[] = [
     { id: 'chats', icon: 'chatbubble-ellipses', route: '/(tabs)' },
-    { id: 'updates', icon: 'radio-outline', route: '/updates', badge: unreadStatusCount },
     { id: 'approvals', icon: 'checkmark-done-circle-outline', route: '/approvals', badge: pendingForMe },
+    { id: 'updates', icon: 'radio-outline', route: '/updates', badge: unreadStatusCount },
     { id: 'calls', icon: 'call-outline', route: '/calls' },
     { id: 'people', icon: 'people-outline', route: '/people' },
     { id: 'settings', icon: 'settings-outline', route: '/(tabs)/settings' },
@@ -574,7 +574,7 @@ export function WebApprovals({ initialRequestId, initialGroupId, initialMode }: 
       )}
     >
       {pane.mode === 'empty' && <EmptyDetail icon="checkmark-done-circle-outline" title="Approvals" text="Pick a request to review it, or send something new for sign-off." />}
-      {pane.mode === 'request' && <ApprovalRequestDetail requestId={pane.id} onOpenGroup={openGroup} onEdit={(id) => setPane({ mode: 'edit', id })} />}
+      {pane.mode === 'request' && <ApprovalRequestDetail requestId={pane.id} onClose={() => setPane({ mode: 'empty' })} onOpenGroup={openGroup} onEdit={(id) => setPane({ mode: 'edit', id })} />}
       {pane.mode === 'edit' && (
         <View style={{ flex: 1 }}>
           <View style={styles.subpageHeader}>
@@ -589,6 +589,7 @@ export function WebApprovals({ initialRequestId, initialGroupId, initialMode }: 
       {pane.mode === 'group' && (
         <ApprovalGroupDetail
           groupId={pane.id}
+          onClose={() => setPane({ mode: 'empty' })}
           onNewRequest={() => setPane({ mode: 'new', groupId: pane.id })}
           onOpenChat={() => router.push({ pathname: '/chat/[id]', params: { id: pane.id } })}
           onOpenRequest={openRequest}
@@ -687,8 +688,12 @@ export function WebSettings() {
     });
 
     if (!result.canceled && result.assets[0]) {
-      await updateProfilePicture(result.assets[0].uri);
-      Alert.alert('Profile picture updated');
+      try {
+        await updateProfilePicture(result.assets[0].uri, result.assets[0].mimeType ?? undefined);
+        Alert.alert('Profile picture updated');
+      } catch (error) {
+        Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+      }
     }
   };
 
@@ -730,7 +735,13 @@ export function WebSettings() {
           <Text style={styles.avatarPickerTitle}>Profile photo</Text>
           <View style={styles.defaultAvatarGrid}>
             {Array.from(new Set([...(profile.avatarUrl ? [profile.avatarUrl] : []), ...DEFAULT_PROFILE_AVATARS])).slice(0, 8).map((url) => (
-              <Pressable key={url} onPress={async () => { await updateProfilePicture(url); }} style={[styles.avatarChoice, profile.avatarUrl === url && styles.avatarChoiceActive]}>
+              <Pressable key={url} onPress={async () => {
+                try {
+                  await updateProfilePicture(url);
+                } catch (error) {
+                  Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+                }
+              }} style={[styles.avatarChoice, profile.avatarUrl === url && styles.avatarChoiceActive]}>
                 <Avatar name={profile.displayName} color={profile.avatarColor} size={42} imageUrl={url} />
               </Pressable>
             ))}

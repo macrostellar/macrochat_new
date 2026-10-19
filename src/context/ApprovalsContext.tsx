@@ -2,8 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AppState } from 'react-native';
 import { useApp } from '@/context/AppContext';
 import {
-  buildDecisionSummary,
-  buildRequestSummary,
   cancelApprovalRequestRemote,
   createApprovalGroupRemote,
   createApprovalRequestRemote,
@@ -13,6 +11,7 @@ import {
   updateApprovalMembersRemote,
   updateApprovalRequestRemote,
 } from '@/lib/approvals';
+import { triggerNotification } from '@/lib/notifications';
 import { supabase } from '@/lib/supabase';
 import type { ApprovalDecision, ApprovalDecisionInput, ApprovalGroup, ApprovalMode, ApprovalRequest, ApprovalRole, ApprovalStatus, NewApprovalRequestInput } from '@/types';
 
@@ -34,6 +33,11 @@ type ApprovalsContextValue = {
 };
 
 const ApprovalsContext = createContext<ApprovalsContextValue | null>(null);
+
+// A new decision or edit re-alerts the approvers still waiting on a request.
+function approvalAlertKey(request: ApprovalRequest) {
+  return `${request.id}:${request.decisions.length}:${request.editedAt ?? ''}`;
+}
 
 const DEMO_ME = 'me';
 const demoPeople = {
@@ -92,14 +96,17 @@ function recomputeDemoStatus(request: ApprovalRequest, mode: ApprovalMode): Appr
 }
 
 export function ApprovalsProvider({ children }: PropsWithChildren) {
-  const { profile, backendMode, logChatSystemMessage, refreshChats } = useApp();
+  const { profile, backendMode, refreshChats, notificationPrefs } = useApp();
   const [groups, setGroups] = useState<ApprovalGroup[]>([]);
   const [requests, setRequests] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [dataOwner, setDataOwner] = useState<string | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const seenAwaitingRef = useRef<{ owner: string; keys: Set<string> } | null>(null);
+  const seenMineRef = useRef<{ owner: string; states: Map<string, { status: string; decisionCount: number }> } | null>(null);
+  const notificationPrefsRef = useRef(notificationPrefs);
+  useEffect(() => { notificationPrefsRef.current = notificationPrefs; }, [notificationPrefs]);
 
-  const actorName = profile?.displayName || 'Someone';
   const isDemo = backendMode === 'demo' || !supabase;
 
   // Reset (or seed, in demo mode) whenever the signed-in profile changes.
@@ -122,6 +129,45 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
     if (!supabase || !profile || isDemo) return;
     try {
       const snapshot = await fetchApprovalSnapshot(supabase);
+      // The first load is silent; later loads notify when a request I still need to decide on is new or changed.
+      const awaiting = snapshot.requests.filter((request) => request.awaitingMe);
+      const previous = seenAwaitingRef.current;
+      seenAwaitingRef.current = { owner: profile.id, keys: new Set(awaiting.map(approvalAlertKey)) };
+      if (previous?.owner === profile.id) {
+        awaiting.filter((request) => !previous.keys.has(approvalAlertKey(request))).forEach((request) => {
+          void triggerNotification('approvals', notificationPrefsRef.current, {
+            title: `Approval needed · ${request.groupName}`,
+            messagePreview: request.title,
+          });
+        });
+      }
+
+      // Requesters hear about decisions on their own requests; the first load is silent.
+      const mine = snapshot.requests.filter((request) => request.mine);
+      const previousMine = seenMineRef.current;
+      seenMineRef.current = { owner: profile.id, states: new Map(mine.map((request) => [request.id, { status: request.status, decisionCount: request.decisions.length }])) };
+      if (previousMine?.owner === profile.id) {
+        mine.forEach((request) => {
+          const before = previousMine.states.get(request.id);
+          if (!before) return;
+          const latest = request.decisions[request.decisions.length - 1];
+          const statusChanged = request.status !== before.status && ['approved', 'rejected', 'changes'].includes(request.status);
+          const newDecision = request.decisions.length > before.decisionCount && latest;
+          if (statusChanged) {
+            const label = request.status === 'changes' ? 'needs changes' : request.status;
+            void triggerNotification('approvals', notificationPrefsRef.current, {
+              title: `Request ${label} · ${request.groupName}`,
+              messagePreview: request.title,
+            });
+          } else if (newDecision) {
+            const verb = latest.decision === 'changes' ? 'requested changes on' : latest.decision;
+            void triggerNotification('approvals', notificationPrefsRef.current, {
+              title: `New decision · ${request.groupName}`,
+              messagePreview: `${latest.approverName} ${verb} \u201C${request.title}\u201D`,
+            });
+          }
+        });
+      }
       setGroups(snapshot.groups);
       setRequests(snapshot.requests);
     } catch (error) {
@@ -241,13 +287,12 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
         awaitingMe: false,
       };
       setRequests((current) => [request, ...current]);
-      logChatSystemMessage(group.id, buildRequestSummary(profile.displayName, request.title, request.contentKind));
       return id;
     }
-    const id = await createApprovalRequestRemote(supabase, actorName, input);
+    const id = await createApprovalRequestRemote(supabase, input);
     await Promise.all([refreshApprovals(), refreshChats()]);
     return id;
-  }, [profile, isDemo, groups, actorName, logChatSystemMessage, refreshApprovals, refreshChats]);
+  }, [profile, isDemo, groups, refreshApprovals, refreshChats]);
 
   const updateApprovalRequest = useCallback<ApprovalsContextValue['updateApprovalRequest']>(async (requestId, input) => {
     const request = requests.find((item) => item.id === requestId);
@@ -272,12 +317,11 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
         decisions: [],
         myDecision: undefined,
       } : item)));
-      logChatSystemMessage(request.groupId, `\u270F\uFE0F ${profile.displayName} edited \u201C${input.title.trim()}\u201D`);
       return;
     }
-    await updateApprovalRequestRemote(supabase, actorName, request, input);
+    await updateApprovalRequestRemote(supabase, request, input);
     await Promise.all([refreshApprovals(), refreshChats()]);
-  }, [requests, profile, isDemo, actorName, logChatSystemMessage, refreshApprovals, refreshChats]);
+  }, [requests, profile, isDemo, refreshApprovals, refreshChats]);
 
   const submitApprovalDecision = useCallback<ApprovalsContextValue['submitApprovalDecision']>(async (requestId, input) => {
     const request = requests.find((item) => item.id === requestId);
@@ -301,13 +345,12 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       next.status = recomputeDemoStatus(next, group?.approvalMode ?? 'all');
       next.resolvedAt = next.status === 'approved' || next.status === 'rejected' ? now : undefined;
       setRequests((current) => current.map((item) => (item.id === requestId ? next : item)));
-      logChatSystemMessage(request.groupId, buildDecisionSummary(profile.displayName, request, input, next.status));
       return next.status;
     }
-    const status = await submitApprovalDecisionRemote(supabase, actorName, request, input);
+    const status = await submitApprovalDecisionRemote(supabase, request, input);
     await Promise.all([refreshApprovals(), refreshChats()]);
     return status;
-  }, [requests, groups, profile, isDemo, actorName, logChatSystemMessage, refreshApprovals, refreshChats]);
+  }, [requests, groups, profile, isDemo, refreshApprovals, refreshChats]);
 
   const cancelApprovalRequest = useCallback<ApprovalsContextValue['cancelApprovalRequest']>(async (requestId) => {
     const request = requests.find((item) => item.id === requestId);
@@ -316,9 +359,9 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       setRequests((current) => current.map((item) => (item.id === requestId ? { ...item, status: 'cancelled', awaitingMe: false } : item)));
       return;
     }
-    await cancelApprovalRequestRemote(supabase, actorName, request);
+    await cancelApprovalRequestRemote(supabase, request);
     await Promise.all([refreshApprovals(), refreshChats()]);
-  }, [requests, isDemo, actorName, refreshApprovals, refreshChats]);
+  }, [requests, isDemo, refreshApprovals, refreshChats]);
 
   const pendingForMe = useMemo(() => requests.filter((request) => request.awaitingMe).length, [requests]);
 

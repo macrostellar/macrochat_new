@@ -31,8 +31,8 @@ export default function TabLayout() {
         : route.name === 'approvals' && pendingForMe > 0 ? pendingForMe : undefined,
     })}>
       <Tabs.Screen name="index" options={{ title: 'Chats' }} />
-      <Tabs.Screen name="updates" options={{ title: 'Updates' }} />
       <Tabs.Screen name="approvals" options={{ title: 'Approvals' }} />
+      <Tabs.Screen name="updates" options={{ title: 'Updates' }} />
       <Tabs.Screen name="calls" options={{ title: 'Calls' }} />
       <Tabs.Screen name="people" options={{ title: 'People' }} />
       <Tabs.Screen name="settings" options={{ title: 'Settings' }} />

@@ -12,6 +12,8 @@ import { useApp } from '@/context/AppContext';
 import { useApprovals } from '@/context/ApprovalsContext';
 import { presenceLabelForDisplay } from '@/lib/useChatActivity';
 import { STICKER_LIST } from '@/lib/stickers';
+import { buildDaySeparatorLabels, messageInfoRows } from '@/lib/messageInfo';
+import { withDaySeparator } from '@/components/DaySeparator';
 import { colors } from '@/theme/colors';
 import type { Chat, Message } from '@/types';
 
@@ -404,6 +406,7 @@ function Conversation({ chat }: { chat: Chat }) {
   const [forwardMessage, setForwardMessage] = useState<Message | null>(null);
   const [profileViewer, setProfileViewer] = useState<{ name: string; macroId: string; avatarUrl?: string; avatarColor: string } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<{ chatId: string; messageId: string } | null>(null);
+  const [infoMessage, setInfoMessage] = useState<Message | null>(null);
   const [videoRatios, setVideoRatios] = useState<Record<string, number>>({});
   const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
   const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
@@ -420,6 +423,7 @@ function Conversation({ chat }: { chat: Chat }) {
   const audioChunksRef = useRef<Blob[]>([]);
   const inputRef = useRef<any>(null);
   const messages = useMemo(() => [...chat.messages].reverse(), [chat.messages]);
+  const dayLabels = useMemo(() => buildDaySeparatorLabels(messages), [messages]);
   const pinnedMessage = chat.messages.find((message) => message.pinned);
   const pinnedHeader = pinnedMessage ? (
     <Pressable
@@ -792,7 +796,7 @@ function Conversation({ chat }: { chat: Chat }) {
     { label: '30 days', value: 2592000 },
   ] as const;
 
-  const handleMessageAction = async (messageKey: string, action: 'reply' | 'delete' | 'forward' | 'reaction' | 'pin' | 'star', emoji?: string) => {
+  const handleMessageAction = async (messageKey: string, action: 'reply' | 'delete' | 'forward' | 'reaction' | 'pin' | 'star' | 'info', emoji?: string) => {
     // Look up the message from current state by its stable clientId (falling back to id),
     // so the real server UUID is always available even right after the message syncs.
     const currentMessage = chat.messages.find((m) => m.clientId === messageKey || m.id === messageKey);
@@ -843,6 +847,11 @@ function Conversation({ chat }: { chat: Chat }) {
       closeMenu();
       return;
     }
+    if (action === 'info') {
+      setInfoMessage(currentMessage);
+      closeMenu();
+      return;
+    }
     if (action === 'forward') {
       setForwardMessage(currentMessage);
       closeMenu();
@@ -877,7 +886,7 @@ function Conversation({ chat }: { chat: Chat }) {
       setMenuAnchor(null);
       return;
     }
-    const MENU_HEIGHT_ESTIMATE = 190;
+    const MENU_HEIGHT_ESTIMATE = 260;
     const btnRect = event.currentTarget?.getBoundingClientRect?.();
     const containerRect = conversationRef.current?.getBoundingClientRect?.();
     if (btnRect && containerRect) {
@@ -1194,7 +1203,7 @@ function Conversation({ chat }: { chat: Chat }) {
         scrollEventThrottle={16}
         getItemLayout={(_, index) => ({ length: 96, offset: index * 96, index })}
         onScroll={(event) => setAwayFromBottom(event.nativeEvent.contentOffset.y > 160)}
-        renderItem={({ item, index }) => {
+        renderItem={({ item, index }) => withDaySeparator(dayLabels.get(item), () => {
           if (item.kind === 'call') {
             return <CallMessageBubble item={item} />;
           }
@@ -1364,7 +1373,7 @@ function Conversation({ chat }: { chat: Chat }) {
               </View>
             </Swipeable>
           );
-        }}
+        })}
       />
 
       {awayFromBottom && (
@@ -1402,8 +1411,28 @@ function Conversation({ chat }: { chat: Chat }) {
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'pin'); }}><Ionicons name="pin" size={14} color={colors.white} /><Text style={styles.actionText}>{activeMenuMessage?.pinned ? 'Unpin' : 'Pin'}</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'star'); }}><Ionicons name="star" size={14} color={colors.white} /><Text style={styles.actionText}>{activeMenuMessage?.starred ? 'Unstar' : 'Star'}</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'forward'); }}><Ionicons name="arrow-redo-outline" size={14} color={colors.white} /><Text style={styles.actionText}>Forward</Text></Pressable>
+          <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'info'); }}><Ionicons name="information-circle-outline" size={14} color={colors.white} /><Text style={styles.actionText}>Message info</Text></Pressable>
           <Pressable style={styles.actionRow} onPress={() => { void handleMessageAction(activeMenuMessage!.clientId ?? activeMenuMessage!.id, 'delete'); }}><Ionicons name="trash-outline" size={14} color={colors.danger} /><Text style={[styles.actionText, { color: colors.danger }]}>Delete</Text></Pressable>
         </View>
+      )}
+
+      {infoMessage && (
+        <Modal transparent animationType="fade" visible onRequestClose={() => setInfoMessage(null)}>
+          <Pressable style={styles.deleteConfirmBackdrop} onPress={() => setInfoMessage(null)}>
+            <Pressable style={styles.deleteConfirmCard} onPress={() => undefined}>
+              <Text style={styles.deleteConfirmTitle}>Message info</Text>
+              {messageInfoRows(infoMessage).map((row) => (
+                <View key={row.label} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, paddingVertical: 6 }}>
+                  <Text style={{ color: colors.muted, fontSize: 13 }}>{row.label}</Text>
+                  <Text style={{ color: colors.white, fontSize: 13, fontWeight: '700', flexShrink: 1, textAlign: 'right' }}>{row.value}</Text>
+                </View>
+              ))}
+              <Pressable style={[styles.deleteConfirmBtn, styles.deleteConfirmBtnCancel]} onPress={() => setInfoMessage(null)}>
+                <Text style={styles.deleteConfirmBtnText}>Close</Text>
+              </Pressable>
+            </Pressable>
+          </Pressable>
+        </Modal>
       )}
 
       {deleteConfirm && (
@@ -1778,11 +1807,11 @@ export function WebMessenger({ initialChatId }: { initialChatId?: string } = {})
         <View style={styles.logo}><Text style={styles.logoText}>M</Text></View>
         <View style={styles.railNav}>
           <Pressable accessibilityLabel="Chats" style={[styles.railButton, styles.railActive]}><Ionicons name="chatbubble-ellipses" size={22} color={colors.neon} /></Pressable>
-          <Pressable accessibilityLabel="Updates" style={styles.railButton} onPress={() => router.push('/updates')}><Ionicons name="radio-outline" size={22} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="Approvals" style={styles.railButton} onPress={() => router.push('/approvals')}>
             <Ionicons name="checkmark-done-circle-outline" size={22} color={colors.muted} />
             {pendingApprovals > 0 && <View style={styles.railBadge}><Text style={styles.railBadgeText}>{pendingApprovals > 9 ? '9+' : pendingApprovals}</Text></View>}
           </Pressable>
+          <Pressable accessibilityLabel="Updates" style={styles.railButton} onPress={() => router.push('/updates')}><Ionicons name="radio-outline" size={22} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="Calls" style={styles.railButton} onPress={() => router.push('/calls')}><Ionicons name="call-outline" size={21} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="People" style={styles.railButton} onPress={() => router.push('/people')}><Ionicons name="people-outline" size={22} color={colors.muted} /></Pressable>
           <Pressable accessibilityLabel="Settings" style={styles.railButton} onPress={() => router.push('/(tabs)/settings')}><Ionicons name="settings-outline" size={22} color={colors.muted} /></Pressable>

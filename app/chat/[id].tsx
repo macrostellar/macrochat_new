@@ -19,6 +19,8 @@ import { AmbientQuantumField } from '@/components/AmbientQuantumField';
 import { MessageTimerBorder } from '@/components/MessageTimerBorder';
 import { VideoPreviewPlayer, VideoThumbnail, clampVideoRatio } from '@/components/VideoThumbnail';
 import { WebMessenger } from '@/components/WebMessenger';
+import { withDaySeparator } from '@/components/DaySeparator';
+import { buildDaySeparatorLabels, messageInfoRows } from '@/lib/messageInfo';
 import { STICKER_LIST, type Sticker } from '@/lib/stickers';
 import { useApp } from '@/context/AppContext';
 import { colors } from '@/theme/colors';
@@ -151,6 +153,7 @@ export default function ConversationScreen() {
   const [profileViewer, setProfileViewer] = useState<{ name: string; macroId: string; avatarUrl?: string; avatarColor: string } | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [menuMessage, setMenuMessage] = useState<Message | null>(null);
+  const [infoMessage, setInfoMessage] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [editText, setEditText] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -183,6 +186,7 @@ export default function ConversationScreen() {
     if (!chat) return [];
     return [...chat.messages].reverse();
   }, [chat]);
+  const dayLabels = useMemo(() => buildDaySeparatorLabels(messages), [messages]);
 
   const resetReplySwipe = (messageId?: string | null) => {
     const ref = messageId ? swipeableRefs.current[messageId] : null;
@@ -832,7 +836,7 @@ export default function ConversationScreen() {
           list.current?.scrollToOffset({ offset: index * 90, animated: true });
         }}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-        renderItem={({ item }) => {
+        renderItem={({ item }) => withDaySeparator(dayLabels.get(item), () => {
           if (item.kind === 'call') {
             return <CallMessageBubble item={item} />;
           }
@@ -974,7 +978,7 @@ export default function ConversationScreen() {
               </View>
             </Swipeable>
           );
-        }}
+        })}
       />
       {awayFromBottom && (
         <View style={{ position: 'absolute', bottom: 12, right: 14, alignItems: 'center' }}>
@@ -1199,11 +1203,39 @@ export default function ConversationScreen() {
               onPress={() => {
                 const target = menuMessage;
                 setMenuMessage(null);
+                if (target) setInfoMessage(target);
+              }}
+            >
+              <Ionicons name="information-circle-outline" size={18} color={colors.white} />
+              <Text style={styles.menuItemText}>Message info</Text>
+            </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                const target = menuMessage;
+                setMenuMessage(null);
                 if (target) deleteMessage(chat.id, target.id);
               }}
             >
               <Ionicons name="trash-outline" size={18} color={colors.danger} />
               <Text style={[styles.menuItemText, { color: colors.danger }]}>Delete</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      )}
+
+      {infoMessage && (
+        <Pressable style={styles.sheetBackdrop} onPress={() => setInfoMessage(null)}>
+          <Pressable style={styles.sheetCard} onPress={() => undefined}>
+            <Text style={{ color: colors.white, fontSize: 16, fontWeight: '800', marginBottom: 12 }}>Message info</Text>
+            {messageInfoRows(infoMessage).map((row) => (
+              <View key={row.label} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, paddingVertical: 6 }}>
+                <Text style={{ color: colors.muted, fontSize: 14 }}>{row.label}</Text>
+                <Text style={{ color: colors.white, fontSize: 14, fontWeight: '700', flexShrink: 1, textAlign: 'right' }}>{row.value}</Text>
+              </View>
+            ))}
+            <Pressable style={[styles.menuItem, { marginTop: 10, marginHorizontal: 0 }]} onPress={() => setInfoMessage(null)}>
+              <Text style={styles.menuItemText}>Close</Text>
             </Pressable>
           </Pressable>
         </Pressable>

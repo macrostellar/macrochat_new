@@ -21,6 +21,7 @@ export type NotificationPreferences = {
   calls: 'on' | 'off';
   status: 'on' | 'mentions' | 'off';
   updates: 'on' | 'off';
+  approvals: 'on' | 'off';
   sound: boolean;
   vibration: boolean;
   preview: boolean;
@@ -36,6 +37,7 @@ export const defaultNotificationPreferences: NotificationPreferences = {
   calls: 'on',
   status: 'mentions',
   updates: 'on',
+  approvals: 'on',
   sound: true,
   vibration: true,
   preview: true,

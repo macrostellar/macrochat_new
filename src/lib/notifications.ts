@@ -15,7 +15,7 @@ try {
   // OK — running in Expo Go or environment doesn't support push.
 }
 
-export type NotificationCategory = 'messages' | 'calls' | 'status' | 'updates';
+export type NotificationCategory = 'messages' | 'calls' | 'status' | 'updates' | 'approvals';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 

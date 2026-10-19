@@ -210,19 +210,29 @@ export function useFilteredApprovals(tab: ApprovalTab, query: string, filters: H
   const q = query.trim().toLowerCase();
   return useMemo(() => {
     const matches = (request: ApprovalRequest) => !q || `${request.title} ${request.requesterName} ${request.groupName} ${request.groupCategory} ${request.body ?? ''}`.toLowerCase().includes(q);
+    const resolved = (request: ApprovalRequest) => request.status === 'approved' || request.status === 'rejected' || request.status === 'changes';
     if (tab === 'inbox') {
       const inbox = requests.filter((request) => !request.mine && request.status === 'pending' && matches(request));
+      const decided = requests.filter((request) => !request.mine && resolved(request) && Boolean(request.myDecision) && matches(request));
       return {
         sections: [
           { title: 'NEEDS YOUR DECISION', data: inbox.filter((request) => request.awaitingMe) },
           { title: 'WAITING ON OTHERS', data: inbox.filter((request) => !request.awaitingMe) },
+          { title: 'DECIDED BY YOU', data: decided },
         ].filter((section) => section.data.length > 0),
         groups: [] as ApprovalGroup[],
       };
     }
     if (tab === 'sent') {
       const sent = requests.filter((request) => request.mine && request.status === 'pending' && matches(request));
-      return { sections: sent.length > 0 ? [{ title: 'WAITING FOR DECISION', data: sent }] : [], groups: [] as ApprovalGroup[] };
+      const outcomes = requests.filter((request) => request.mine && resolved(request) && matches(request));
+      return {
+        sections: [
+          { title: 'WAITING FOR DECISION', data: sent },
+          { title: 'DECIDED', data: outcomes },
+        ].filter((section) => section.data.length > 0),
+        groups: [] as ApprovalGroup[],
+      };
     }
     if (tab === 'history') {
       const done = requests
@@ -367,7 +377,7 @@ function ContentPreview({ request }: { request: ApprovalRequest }) {
   );
 }
 
-export function ApprovalRequestDetail({ requestId, onBack, onOpenGroup, onEdit }: { requestId: string; onBack?: () => void; onOpenGroup?: (groupId: string) => void; onEdit?: (requestId: string) => void }) {
+export function ApprovalRequestDetail({ requestId, onBack, onClose, onOpenGroup, onEdit }: { requestId: string; onBack?: () => void; onClose?: () => void; onOpenGroup?: (groupId: string) => void; onEdit?: (requestId: string) => void }) {
   const { requests, groups, cancelApprovalRequest } = useApprovals();
   const [sheetKind, setSheetKind] = useState<ApprovalDecisionKind | null>(null);
   const request = requests.find((item) => item.id === requestId);
@@ -407,6 +417,7 @@ export function ApprovalRequestDetail({ requestId, onBack, onOpenGroup, onEdit }
             <View style={{ marginTop: 6, flexDirection: 'row' }}><CategoryTag category={request.groupCategory} /></View>
           </View>
           <StatusPill status={request.status} />
+          {onClose && <Pressable accessibilityLabel="Close" style={styles.backButton} onPress={onClose}><Ionicons name="close" size={22} color={colors.white} /></Pressable>}
         </View>
 
         {due && <View style={[styles.dueBanner, due.overdue && { borderColor: colors.danger }]}><Ionicons name="time-outline" size={15} color={due.overdue ? colors.danger : colors.yellow} /><Text style={[styles.dueText, due.overdue && { color: colors.danger }]}>{due.label}</Text></View>}
@@ -860,8 +871,8 @@ export function NewApprovalGroupForm({ onDone }: { onDone: (groupId: string) => 
   );
 }
 
-export function ApprovalGroupDetail({ groupId, onBack, onNewRequest, onOpenChat, onOpenRequest }: {
-  groupId: string; onBack?: () => void; onNewRequest: () => void; onOpenChat: () => void; onOpenRequest: (id: string) => void;
+export function ApprovalGroupDetail({ groupId, onBack, onClose, onNewRequest, onOpenChat, onOpenRequest }: {
+  groupId: string; onBack?: () => void; onClose?: () => void; onNewRequest: () => void; onOpenChat: () => void; onOpenRequest: (id: string) => void;
 }) {
   const { profile } = useApp();
   const { groups, requests, updateApprovalMembers } = useApprovals();
@@ -890,6 +901,7 @@ export function ApprovalGroupDetail({ groupId, onBack, onNewRequest, onOpenChat,
           <Text style={styles.detailMeta}>{group.approvalMode === 'all' ? 'All approvers must approve' : 'Any one approver is enough'} · {group.isOwner ? 'you own this group' : `you are ${group.myRole === 'approver' ? 'an approver' : 'a submitter'}`}</Text>
           <View style={{ marginTop: 6, flexDirection: 'row' }}><CategoryTag category={group.category} /></View>
         </View>
+        {onClose && <Pressable accessibilityLabel="Close" style={styles.backButton} onPress={onClose}><Ionicons name="close" size={22} color={colors.white} /></Pressable>}
       </View>
 
       <View style={styles.actionRow}>

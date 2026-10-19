@@ -115,6 +115,13 @@ export default function NotificationsScreen() {
         options={['on', 'off']}
         onChange={(value) => handleSettingChange('updates', value)}
       />
+      <NotificationToggle
+        label="Approvals"
+        detail="Approval requests and decisions"
+        value={notificationPrefs.approvals}
+        options={['on', 'off']}
+        onChange={(value) => handleSettingChange('approvals', value)}
+      />
 
       <Text style={styles.section}>SOUNDS</Text>
       <Pressable style={styles.row} onPress={() => router.push('/security/ringtone?target=message')}>

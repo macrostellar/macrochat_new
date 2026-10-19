@@ -52,7 +52,7 @@ type AppContextValue = {
   notificationPrefs: NotificationPreferences;
   register: (displayName: string) => Promise<Profile>;
   restoreProfile: () => Promise<Profile | null>;
-  updateProfilePicture: (avatarUrl: string | null) => Promise<void>;
+  updateProfilePicture: (avatarUrl: string | null, mimeType?: string) => Promise<void>;
   updateProfileStatus: (status: ProfileStatus) => Promise<void>;
   updateProfileDisplayName: (displayName: string) => Promise<void>;
   setChatDisappearingTimer: (chatId: string, seconds: number | null) => void;
@@ -435,6 +435,25 @@ async function readUriAsUploadBody(uri: string) {
     encoding: 'base64',
   });
   return base64ToUint8Array(base64);
+}
+
+const AVATAR_BUCKET = 'macrochat-avatars';
+
+async function uploadAvatarImage(uri: string, mimeType?: string): Promise<string> {
+  if (!supabase) throw new Error('Profile photo upload needs a connection to the server.');
+  const userId = await getAuthenticatedUserId(supabase);
+  const contentType = mimeType?.startsWith('image/') ? mimeType : 'image/jpeg';
+  const ext = contentType.slice('image/'.length).replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpg';
+  const path = `${userId}/${Date.now()}.${ext}`;
+  const body = await readUriAsUploadBody(uri);
+
+  const { error } = await supabase.storage.from(AVATAR_BUCKET).upload(path, body, {
+    contentType,
+    upsert: false,
+  });
+  if (error) throw toReadableDbError('Uploading profile photo failed', error);
+
+  return supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path).data.publicUrl;
 }
 
 async function ensurePortableDataUrl(uri: string, mimeType?: string): Promise<string> {
@@ -1167,7 +1186,18 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    const membershipRows = memberRes.data ?? [];
+    // Approval groups are group conversations that belong only in the Approvals tab.
+    const allMembershipRows = memberRes.data ?? [];
+    const approvalGroupIds = new Set<string>();
+    if (allMembershipRows.length > 0) {
+      const approvalGroupRes = await supabase
+        .from('macrochat_approval_groups')
+        .select('conversation_id')
+        .in('conversation_id', allMembershipRows.map((row) => row.conversation_id));
+      if (approvalGroupRes.error) console.warn('Failed to load approval groups', approvalGroupRes.error.message);
+      (approvalGroupRes.data ?? []).forEach((row) => approvalGroupIds.add(row.conversation_id as string));
+    }
+    const membershipRows = allMembershipRows.filter((row) => !approvalGroupIds.has(row.conversation_id));
     const conversationIds = membershipRows.map((row) => row.conversation_id);
     if (conversationIds.length === 0) {
       setChats([]);
@@ -2243,9 +2273,13 @@ export function AppProvider({ children }: PropsWithChildren) {
     await loadChatsFromBackend();
   }, [loadChatsFromBackend, profile, refreshPrivacyState]);
 
-  const updateProfilePicture = useCallback(async (avatarUrl: string | null) => {
+  const updateProfilePicture = useCallback(async (avatarUrl: string | null, mimeType?: string) => {
     if (!profile) return;
-    const nextProfile: Profile = { ...profile, avatarUrl: avatarUrl ?? undefined };
+    // Device-local photos (file:// , content://, blob:) are uploaded so other users can load them.
+    const storedUrl = avatarUrl && supabase && !/^https?:\/\//i.test(avatarUrl)
+      ? await uploadAvatarImage(avatarUrl, mimeType)
+      : avatarUrl;
+    const nextProfile: Profile = { ...profile, avatarUrl: storedUrl ?? undefined };
     setProfile(nextProfile);
     await writeProfileToStorage(nextProfile);
 
@@ -2256,7 +2290,7 @@ export function AppProvider({ children }: PropsWithChildren) {
           macro_id: profile.macroId,
           display_name: profile.displayName,
           avatar_color: profile.avatarColor,
-          avatar_url: avatarUrl ?? null,
+          avatar_url: storedUrl ?? null,
         }, { onConflict: 'id' });
         if (error) {
           const message = (error.message || '').toLowerCase();
