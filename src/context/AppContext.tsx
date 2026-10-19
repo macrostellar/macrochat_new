@@ -24,6 +24,7 @@ import { initializeE2EEProService, type E2EEProService } from '@/lib/e2ee-pro-se
 import { triggerNotification, requestNotificationPermission, getCategoryFromMessage, stopCallAlert } from '@/lib/notifications';
 import { configureNotificationChannels, registerPushToken } from '@/lib/push';
 import { useChatActivity } from '@/lib/useChatActivity';
+import { inboxTopic, notifyConversation } from '@/lib/inbox';
 
 const PROFILE_KEY = 'macrochat.profile';
 const DEVICE_ID_KEY = 'macrochat.device_id';
@@ -1166,13 +1167,10 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (!supabase || !profile) return;
     const client = supabase;
 
-    if (e2eePro) {
-      try {
-        await e2eePro.loadActiveSessions();
-      } catch (e) {
-        console.warn('Failed to refresh E2EE sessions:', e);
-      }
-    }
+    // Runs alongside the queries below; awaited before messages are decrypted.
+    const sessionsReady = e2eePro
+      ? e2eePro.loadActiveSessions().catch((e) => console.warn('Failed to refresh E2EE sessions:', e))
+      : Promise.resolve();
 
     const actorUserId = await getAuthenticatedUserId(supabase);
 
@@ -1215,6 +1213,8 @@ export function AppProvider({ children }: PropsWithChildren) {
         .in('conversation_id', conversationIds),
       Promise.all(conversationIds.map((conversationId) => fetchMessagePage(client, conversationId, null))),
     ]);
+
+    await sessionsReady;
 
     const messagesError = messagePages.find((page) => page.error)?.error ?? null;
     if (conversationsRes.error || conversationMembersRes.error || messagesError) {
@@ -1653,11 +1653,11 @@ export function AppProvider({ children }: PropsWithChildren) {
     })();
   }, [profile]);
 
-  const realtimeHandlers = useRef({ loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions });
+  const realtimeHandlers = useRef({ loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions, chats });
   const realtimeUserId = profile?.id;
   useEffect(() => {
-    realtimeHandlers.current = { loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions };
-  }, [loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions]);
+    realtimeHandlers.current = { loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions, chats };
+  }, [loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions, chats]);
 
   useEffect(() => {
     if (e2eePro || e2eePassphrase) void realtimeHandlers.current.loadChatsFromBackend();
@@ -1667,7 +1667,28 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (!supabase) { setChats(demoChats); return; }
     if (!realtimeUserId) { setChats([]); return; }
     // Full reloads run on login, reconnect, and membership changes. Message events are applied directly.
-    const reload = () => realtimeHandlers.current.loadChatsFromBackend().catch(() => undefined);
+    let disposed = false;
+    let reloading = false;
+    let reloadQueued = false;
+    // Overlapping reloads are coalesced into one trailing run.
+    const reload = async (): Promise<void> => {
+      if (reloading) {
+        reloadQueued = true;
+        return;
+      }
+      reloading = true;
+      try {
+        await realtimeHandlers.current.loadChatsFromBackend();
+      } catch {
+        // Next trigger retries.
+      } finally {
+        reloading = false;
+        if (reloadQueued && !disposed) {
+          reloadQueued = false;
+          void reload();
+        }
+      }
+    };
     void reload();
     void realtimeHandlers.current.refreshMessageReactions();
 
@@ -1689,12 +1710,23 @@ export function AppProvider({ children }: PropsWithChildren) {
       }));
     };
 
+    // Incoming rows can arrive via broadcast, postgres_changes or polling; the first one wins.
+    const seenIncoming = new Set<string>();
+    const ingestRow = (row: MessageRow) => {
+      if (isLocallyDeleted(row)) return;
+      if (row.sender_id !== realtimeUserId) {
+        if (seenIncoming.has(row.id)) return;
+        seenIncoming.add(row.id);
+      }
+      realtimeHandlers.current.mergeRealtimeMessage(row, true);
+      if (row.kind !== 'text') void signMediaForRow(row);
+    };
+
     const channel = supabase.channel(`macrochat-sync-${realtimeUserId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
-        if (!nextRow || isLocallyDeleted(nextRow)) return;
-        realtimeHandlers.current.mergeRealtimeMessage(nextRow, true);
-        if (nextRow.kind !== 'text') void signMediaForRow(nextRow);
+        if (!nextRow) return;
+        ingestRow(nextRow);
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
@@ -1748,17 +1780,119 @@ export function AppProvider({ children }: PropsWithChildren) {
         }));
       })
       .subscribe((status) => {
+        console.log('[Realtime] chat sync channel status:', status);
         if (status === 'SUBSCRIBED') void reload();
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') void poll();
       });
 
-    // Reload only when returning to the foreground if the realtime channel is no longer joined.
+    // Senders ping this channel right after their insert, so delivery skips per-event RLS evaluation.
+    const fetchAndIngest = async (messageId: string) => {
+      if (!supabase || seenIncoming.has(messageId)) return;
+      const run = (select: string) => supabase!.from('macrochat_messages').select(select).eq('id', messageId).maybeSingle();
+      let res: any = await run(FULL_MESSAGE_SELECT);
+      if (res.error) res = await run(BASE_MESSAGE_SELECT);
+      if (res.data) ingestRow(res.data as MessageRow);
+    };
+    const inboxChannel = supabase.channel(inboxTopic(realtimeUserId))
+      .on('broadcast', { event: 'new-message' }, ({ payload }) => {
+        const conversationId = payload?.conversationId as string | undefined;
+        const messageId = payload?.messageId as string | undefined;
+        if (!conversationId || !messageId) return;
+        if (!realtimeHandlers.current.chats.some((chat) => chat.id === conversationId)) {
+          void reload();
+          return;
+        }
+        void fetchAndIngest(messageId).catch(() => undefined);
+      })
+      .on('broadcast', { event: 'new-chat' }, () => {
+        void reload();
+      })
+      .subscribe();
+
+    // Fallback sync so messages and new chats still arrive when realtime is slow, blocked or dropped.
+    let lastPolledAt = new Date(Date.now() - 60_000).toISOString();
+    let seenConversationIds: Set<string> | null = null;
+    let polling = false;
+    async function poll() {
+      if (!supabase || polling || disposed) return;
+      polling = true;
+      try {
+        const run = (select: string) => supabase!
+          .from('macrochat_messages')
+          .select(select)
+          .gt('created_at', lastPolledAt)
+          .order('created_at', { ascending: true })
+          .limit(100);
+        const [messageResFull, membershipRes] = await Promise.all([
+          run(FULL_MESSAGE_SELECT),
+          supabase.from('macrochat_conversation_members').select('conversation_id').eq('user_id', realtimeUserId),
+        ]);
+        const messageRes: any = messageResFull.error ? await run(BASE_MESSAGE_SELECT) : messageResFull;
+
+        if (!membershipRes.error) {
+          const ids = new Set((membershipRes.data ?? []).map((row) => row.conversation_id as string));
+          const hasNewConversation = seenConversationIds !== null && [...ids].some((id) => !seenConversationIds!.has(id));
+          seenConversationIds = ids;
+          if (hasNewConversation) void reload();
+        }
+
+        if (!messageRes.error) {
+          const rows = (messageRes.data ?? []) as unknown as MessageRow[];
+          const knownChats = realtimeHandlers.current.chats;
+          for (const row of rows) {
+            if (isLocallyDeleted(row)) continue;
+            const chat = knownChats.find((item) => item.id === row.conversation_id);
+            // Unknown conversations arrive through the membership check above.
+            if (!chat) continue;
+            const known = chat.messages.some((message) => message.id === row.id || (Boolean(row.client_id) && message.clientId === row.client_id));
+            if (known) continue;
+            ingestRow(row);
+          }
+          const newest = rows[rows.length - 1]?.created_at;
+          if (newest) lastPolledAt = newest;
+        }
+      } catch {
+        // Next tick retries.
+      } finally {
+        polling = false;
+      }
+    }
+
+    let tick = 0;
+    const pollTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      // Poll fast while realtime is down, and slowly as a safety net while it is joined.
+      if (channel.state === 'joined' && ++tick % 4 !== 0) return;
+      void poll();
+    }, 5000);
+    void poll();
+
+    const resync = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (channel.state !== 'joined') void reload();
+      void poll();
+    };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', resync);
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('online', resync);
+      window.addEventListener('focus', resync);
+    }
+
     const appStateSubscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && channel.state !== 'joined') void reload();
+      if (state === 'active') resync();
     });
 
     return () => {
+      disposed = true;
+      clearInterval(pollTimer);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', resync);
+      if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+        window.removeEventListener('online', resync);
+        window.removeEventListener('focus', resync);
+      }
       appStateSubscription.remove();
       supabase?.removeChannel(channel);
+      supabase?.removeChannel(inboxChannel);
     };
   }, [realtimeUserId]);
 
@@ -2782,7 +2916,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         // Replace the optimistic message's id with the real UUID, matched by immutable clientId
         if (data?.[0]) {
           const realId = data[0].id as string;
-          
+          void notifyConversation(client, chatId, actorUserId, 'new-message', { messageId: realId }, recipientUserId).catch(() => undefined);
           // Use debounced last_seen update instead of immediate update (performance optimization)
           scheduleLastSeenUpdate(actorUserId);
 
@@ -2922,7 +3056,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       // Replace the optimistic message's id with the real UUID, matched by immutable clientId
       if (insertRes.data?.[0]) {
         const realId = (insertRes.data as any)[0].id;
-        // Debounce last_seen update for media messages too
+        void notifyConversation(supabase, chatId, actorUserId, 'new-message', { messageId: realId }, chats.find((c) => c.id === chatId)?.participantUserId).catch(() => undefined);
         scheduleLastSeenUpdate(actorUserId);
         
         setChats((current) => current.map((chat) => chat.id === chatId
@@ -3083,7 +3217,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       { conversation_id: conversationId, user_id: target.id, role: 'member' },
     ]);
     if (memberInsertRes.error) throw toReadableDbError('Adding conversation members failed', memberInsertRes.error);
-
+    void notifyConversation(supabase, conversationId, actorUserId, 'new-chat', {}, target.id).catch(() => undefined);
     if (privacySettings.defaultMessageTtlSeconds) {
       const timerUpdate = await supabase
         .from('macrochat_conversations')
