@@ -660,6 +660,7 @@ export function WebSettingsShell({ activeId, title, subtitle, children }: { acti
 
 export function WebSettings() {
   const { profile, backendMode, signOut, updateProfilePicture, updateProfileStatus } = useApp();
+  const [photoError, setPhotoError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState('account');
   const [showSignOutModal, setShowSignOutModal] = useState(false);
@@ -675,9 +676,10 @@ export function WebSettings() {
   const selected = settingsItems.find((item) => item.id === selectedId) ?? settingsItems[0];
 
   const pickProfilePicture = async () => {
+    setPhotoError(null);
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert('Permission needed', 'Allow access to your photo library to set a profile picture.');
+      setPhotoError('Allow access to your photo library to set a profile picture.');
       return;
     }
 
@@ -690,9 +692,8 @@ export function WebSettings() {
     if (!result.canceled && result.assets[0]) {
       try {
         await updateProfilePicture(result.assets[0].uri, result.assets[0].mimeType ?? undefined);
-        Alert.alert('Profile picture updated');
       } catch (error) {
-        Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+        setPhotoError(`Profile picture not saved: ${error instanceof Error ? error.message : 'Please try again.'}`);
       }
     }
   };
@@ -702,9 +703,6 @@ export function WebSettings() {
       console.log('[WebSettings] Confirming sign out - closing modal');
       setShowSignOutModal(false);
       setIsSigningOut(true);
-
-      console.log('[WebSettings] Navigating away before clearing identity state');
-      window.location.href = '/';
 
       console.log('[WebSettings] Calling signOut()');
       await signOut();
@@ -737,15 +735,17 @@ export function WebSettings() {
             {Array.from(new Set([...(profile.avatarUrl ? [profile.avatarUrl] : []), ...DEFAULT_PROFILE_AVATARS])).slice(0, 8).map((url) => (
               <Pressable key={url} onPress={async () => {
                 try {
+                  setPhotoError(null);
                   await updateProfilePicture(url);
                 } catch (error) {
-                  Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+                  setPhotoError(`Profile picture not saved: ${error instanceof Error ? error.message : 'Please try again.'}`);
                 }
               }} style={[styles.avatarChoice, profile.avatarUrl === url && styles.avatarChoiceActive]}>
                 <Avatar name={profile.displayName} color={profile.avatarColor} size={42} imageUrl={url} />
               </Pressable>
             ))}
           </View>
+          {photoError && <Text style={styles.photoErrorText} accessibilityLiveRegion="polite">{photoError}</Text>}
           <Pressable style={styles.uploadButton} onPress={pickProfilePicture}>
             <Ionicons name="cloud-upload-outline" size={16} color={colors.white} />
             <Text style={styles.uploadButtonText}>Upload custom photo</Text>
@@ -925,6 +925,7 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 99 },
   uploadButton: { marginTop: 12, height: 38, borderRadius: 8, backgroundColor: colors.navy800, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   uploadButtonText: { color: colors.white, fontWeight: '700', fontSize: 12 },
+  photoErrorText: { color: colors.danger, fontSize: 12, marginTop: 8 },
   reset: { marginTop: 14, height: 48, borderRadius: 8, borderWidth: 1, borderColor: '#5C2940', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   resetText: { color: colors.danger, fontWeight: '800' },
   // FULLSCREEN CALL STYLES

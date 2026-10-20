@@ -50,13 +50,27 @@ export function describeAuthFailure(error: unknown, action: 'mfa' | 'google-link
   return detail;
 }
 
+const NETWORK_RETRY_DELAYS_MS = [1000, 2000];
+
+function isNetworkFailure(error: unknown) {
+  const failure = error as AuthFailure;
+  return failure?.status === 0 || /network request failed|failed to fetch/i.test(failure?.message ?? '');
+}
+
 export async function ensureAnonymousSession() {
   if (!supabase) return null;
   const { data: existing } = await supabase.auth.getSession();
   if (existing.session) return existing.session;
-  const { data, error } = await supabase.auth.signInAnonymously();
-  if (error) throw error;
-  return data.session;
+
+  for (let attempt = 0; ; attempt += 1) {
+    const { data, error } = await supabase.auth.signInAnonymously();
+    if (!error) return data.session;
+    if (!isNetworkFailure(error)) throw error;
+    if (attempt >= NETWORK_RETRY_DELAYS_MS.length) {
+      throw new Error('Could not reach MacroChat servers. Check your internet connection and try again.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, NETWORK_RETRY_DELAYS_MS[attempt]));
+  }
 }
 
 export async function signInWithGoogle() {

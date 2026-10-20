@@ -30,6 +30,7 @@ const items: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: stri
 export default function SettingsScreen() {
   const { width } = useWindowDimensions();
   const { profile, backendMode, signOut, updateProfilePicture, updateProfileStatus, updateProfileDisplayName } = useApp();
+  const [photoError, setPhotoError] = useState<string | null>(null);
   const [showSignOutModal, setShowSignOutModal] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isEditingName, setIsEditingName] = useState(false);
@@ -39,9 +40,10 @@ export default function SettingsScreen() {
   const qrPayload = `macrochat://add?macroId=${encodeURIComponent(profile.macroId)}`;
 
   const pickProfilePicture = async () => {
+    setPhotoError(null);
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert('Permission needed', 'Allow access to your photo library to set a profile picture.');
+      setPhotoError('Allow access to your photo library to set a profile picture.');
       return;
     }
 
@@ -54,9 +56,8 @@ export default function SettingsScreen() {
     if (!result.canceled && result.assets[0]) {
       try {
         await updateProfilePicture(result.assets[0].uri, result.assets[0].mimeType ?? undefined);
-        Alert.alert('Profile picture updated');
       } catch (error) {
-        Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+        setPhotoError(`Profile picture not saved: ${error instanceof Error ? error.message : 'Please try again.'}`);
       }
     }
   };
@@ -67,16 +68,9 @@ export default function SettingsScreen() {
       setShowSignOutModal(false);
       setIsSigningOut(true);
 
-      if (Platform.OS === 'web') {
-        console.log('[settings] Redirecting away before clearing identity state');
-        window.location.href = '/';
-      } else {
-        console.log('[settings] Navigating away before clearing identity state');
-        router.replace('/');
-      }
-
       console.log('[settings] Calling signOut()');
       await signOut();
+      if (Platform.OS !== 'web') router.replace('/');
       console.log('[settings] Signed out successfully');
     } catch (error: any) {
       console.error('[settings] Sign out error:', error);
@@ -186,9 +180,10 @@ export default function SettingsScreen() {
               {DEFAULT_PROFILE_AVATARS.map((url) => (
                 <Pressable key={url} onPress={async () => {
                   try {
+                    setPhotoError(null);
                     await updateProfilePicture(url);
                   } catch (error) {
-                    Alert.alert('Profile picture not saved', error instanceof Error ? error.message : 'Please try again.');
+                    setPhotoError(`Profile picture not saved: ${error instanceof Error ? error.message : 'Please try again.'}`);
                   }
                 }}>
                   <Avatar name={profile.displayName} color={profile.avatarColor} size={40} imageUrl={url} />
@@ -196,6 +191,7 @@ export default function SettingsScreen() {
               ))}
             </View>
           </ScrollView>
+          {photoError && <Text style={styles.photoErrorText} accessibilityLiveRegion="polite">{photoError}</Text>}
           <Pressable style={styles.uploadButton} onPress={pickProfilePicture}>
             <Ionicons name="cloud-upload-outline" size={16} color={colors.white} />
             <Text style={styles.uploadText}>Upload custom photo</Text>
@@ -303,6 +299,7 @@ const styles = StyleSheet.create({
   avatarTitle: { color: colors.white, fontWeight: '800', fontSize: 14, marginBottom: 10 },
   defaultAvatarRow: { flexDirection: 'row', gap: 12, paddingVertical: 6 },
   avatarScrollContainer: { marginHorizontal: -14 },
+  photoErrorText: { color: colors.danger, fontSize: 12, marginTop: 8 },
   uploadButton: {
     marginTop: 12,
     flexDirection: 'row',

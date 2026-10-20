@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Easing, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Animated, Easing, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { QuantumField } from '@/components/QuantumField';
@@ -12,6 +12,7 @@ export default function WelcomeScreen() {
   const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const entry = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0.7)).current;
   const ctaFloat = useRef(new Animated.Value(0)).current;
@@ -45,19 +46,24 @@ export default function WelcomeScreen() {
   }, [ctaFloat, entry, pulse]);
 
   const createIdentity = async () => {
-    if (name.trim().length < 2) return Alert.alert('Add a name', 'Enter at least two characters.');
+    setError(null);
+    if (name.trim().length < 2) {
+      setError('Enter at least two characters for your display name.');
+      return;
+    }
     setSubmitting(true);
     try {
       await register(name);
       router.replace('/(tabs)');
-    } catch (error) {
-      Alert.alert('Could not create identity', error instanceof Error ? error.message : 'Try again.');
+    } catch (err) {
+      setError(`Could not create identity: ${err instanceof Error ? err.message : 'Try again.'}`);
     } finally {
       setSubmitting(false);
     }
   };
 
   const continueWithGoogle = async () => {
+    setError(null);
     setGoogleLoading(true);
     try {
       const session = await signInWithGoogle();
@@ -74,9 +80,8 @@ export default function WelcomeScreen() {
         || 'Macro User';
       await register(suggestedName);
       router.replace('/(tabs)');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Try again.';
-      Alert.alert('Google sign-in failed', message);
+    } catch (err) {
+      setError(`Google sign-in failed: ${err instanceof Error ? err.message : 'Try again.'}`);
     } finally {
       setGoogleLoading(false);
     }
@@ -142,6 +147,8 @@ export default function WelcomeScreen() {
                     {submitting ? <ActivityIndicator color={colors.black} /> : <><Text style={styles.buttonText}>Create anonymous ID</Text><Ionicons name="arrow-forward" size={20} color={colors.black} /></>}
                   </Pressable>
                 </Animated.View>
+
+                {error && <Text style={styles.errorText} accessibilityLiveRegion="polite">{error}</Text>}
 
                 <Pressable style={({ pressed }) => [styles.googleButton, pressed && { opacity: 0.9 }]} onPress={continueWithGoogle} disabled={googleLoading}>
                   {googleLoading
@@ -288,6 +295,7 @@ const styles = StyleSheet.create({
   recoverButtonText: { color: colors.blue, fontSize: 13, fontWeight: '800' },
   security: { marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 7, justifyContent: 'center' },
   securityText: { color: colors.muted, fontSize: 12 },
+  errorText: { color: colors.danger, fontSize: 13, lineHeight: 18, marginTop: 10, textAlign: 'center', fontWeight: '600' },
   footer: {
     textAlign: 'center',
     color: 'rgba(181, 199, 219, 0.72)',

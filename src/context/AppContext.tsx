@@ -2575,7 +2575,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       console.log('[SignOut] Storage cleared - reloading page for clean login');
       // Force a hard reload to ensure fresh state and clean login
       setTimeout(() => {
-        window.location.href = '/';
+        window.location.replace('/');
       }, 100);
     }
     
