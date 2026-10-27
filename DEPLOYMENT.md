@@ -1,5 +1,27 @@
 # MacroChat Production Deployment Guide
 
+## iOS / TestFlight
+
+The existing App Store app uses `com.rpp.macrochat.app`. Keep the Expo iOS
+bundle identifier and both native target configurations aligned. The next local
+upload is version `1.0.0`, build `2`; increase the build number for later uploads.
+The native Info.plist reads the build number from `CURRENT_PROJECT_VERSION`.
+
+From a fully downloaded local checkout:
+
+```bash
+npm ci
+cd ios
+LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install
+open MacroChat.xcworkspace
+```
+
+Configure production `EXPO_PUBLIC_*` values locally before archiving; Xcode does
+not automatically load the production environment in `eas.json`. Do not commit
+local environment files. Confirm the signing team matches the existing app,
+select Any iOS Device, and use Product > Archive > Distribute App > App Store
+Connect. Select the processed upload in TestFlight.
+
 ## Overview
 Deploy **Signaling Server** (for WebRTC calls) + **TURN Server** (for NAT traversal) + update the **app** to use production URLs.
 

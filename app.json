@@ -9,7 +9,8 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.rpp.macrochat"
+      "bundleIdentifier": "com.rpp.macrochat.app",
+      "buildNumber": "2"
     },
     "android": {
       "package": "com.rpp.macrochat",
