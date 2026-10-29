@@ -4,6 +4,10 @@ dist/
 web-build/
 .env
 .env.local
+.env.*.local
+.env.production
+.env.development
+.env.test
 *.jks
 *.p8
 *.p12

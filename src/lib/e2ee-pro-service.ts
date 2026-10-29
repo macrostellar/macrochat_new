@@ -30,6 +30,7 @@ import {
 import { supabase as sharedSupabase } from './supabase';
 
 const supabase = sharedSupabase!;
+const PEER_DEVICE_CACHE_TTL_MS = 5 * 60_000;
 
 // ============================================================================
 // E2EE PRO SERVICE
@@ -41,6 +42,8 @@ export class E2EEProService {
   private userIdentityKeyPair: UserKeyPair | null = null;
   private deviceKeyPair: DeviceKeyPair | null = null;
   private sessionKeys: Map<string, SessionKey> = new Map();
+  private peerDeviceCache: Map<string, { deviceId: string; at: number }> = new Map();
+  private lastWorkingSecretByPeer: Map<string, string> = new Map();
   private initPromise: Promise<void> | null = null;
 
   constructor(userId: string, deviceId: string) {
@@ -390,7 +393,7 @@ export class E2EEProService {
   /**
    * Get or initiate session with a peer.
    */
-  async getOrCreateSession(peerUserId: string, peerDeviceId: string): Promise<SessionKey> {
+  async getOrCreateSession(peerUserId: string, peerDeviceId: string, createIfMissing = true): Promise<SessionKey> {
     const sessionKey = `${peerUserId}:${peerDeviceId}`;
 
     // Check in-memory cache first
@@ -431,6 +434,8 @@ export class E2EEProService {
       if (newestSession) return newestSession;
     }
 
+    if (!createIfMissing) throw new Error('No existing session');
+
     // No session found, initiate new one
     return this.initiateSessionWithPeer(peerUserId, peerDeviceId);
   }
@@ -467,7 +472,8 @@ export class E2EEProService {
       const sessionKey = `${peerUserId}:${peerDeviceId}`;
       this.sessionKeys.set(sessionKey, newSession);
 
-      await supabase
+      // Decryption only needs the shared secret, so this bookkeeping write must not delay sending.
+      void supabase
         .from('macrochat_session_keys')
         .update({
           chain_key: newSession.chainKey,
@@ -476,12 +482,50 @@ export class E2EEProService {
         .eq('user_id', this.userId)
         .eq('peer_user_id', peerUserId)
         .eq('device_id', this.deviceId)
-        .eq('peer_device_id', peerDeviceId);
+        .eq('peer_device_id', peerDeviceId)
+        .then(({ error: updateError }) => {
+          if (updateError) console.warn('Session counter update failed:', updateError.message);
+        });
 
       return encrypted;
     } catch (error) {
       console.error('Failed to encrypt message:', error);
       throw error;
+    }
+  }
+
+  private async resolvePeerDeviceId(peerUserId: string): Promise<string | null> {
+    const cached = this.peerDeviceCache.get(peerUserId);
+    if (cached && Date.now() - cached.at < PEER_DEVICE_CACHE_TTL_MS) return cached.deviceId;
+
+    // Fetch peer's active X3DH key bundle (public read allowed by RLS)
+    const { data: bundles, error } = await supabase
+      .from('macrochat_x3dh_key_bundles')
+      .select('device_id')
+      .eq('user_id', peerUserId)
+      .eq('is_active', true)
+      .order('published_at', { ascending: false })
+      .limit(1);
+
+    if (error) throw error;
+    if (!bundles || bundles.length === 0) return null;
+
+    const deviceId = bundles[0].device_id as string;
+    this.peerDeviceCache.set(peerUserId, { deviceId, at: Date.now() });
+    return deviceId;
+  }
+
+  /**
+   * Loads the recipient's device and existing session into memory when a chat opens,
+   * so the first message does not wait on key lookups. Never creates a session.
+   */
+  async warmPeer(peerUserId: string): Promise<void> {
+    try {
+      const peerDeviceId = await this.resolvePeerDeviceId(peerUserId);
+      if (!peerDeviceId) return;
+      await this.getOrCreateSession(peerUserId, peerDeviceId, false);
+    } catch {
+      // Warming is best effort; sending falls back to the normal lookup.
     }
   }
 
@@ -495,24 +539,14 @@ export class E2EEProService {
     peerUserId: string
   ): Promise<EncryptedMessage | null> {
     try {
-      // Fetch peer's active X3DH key bundle (public read allowed by RLS)
-      const { data: bundles, error } = await supabase
-        .from('macrochat_x3dh_key_bundles')
-        .select('device_id')
-        .eq('user_id', peerUserId)
-        .eq('is_active', true)
-        .order('published_at', { ascending: false })
-        .limit(1);
-
-      if (error) throw error;
-      if (!bundles || bundles.length === 0) {
+      const peerDeviceId = await this.resolvePeerDeviceId(peerUserId);
+      if (!peerDeviceId) {
         console.warn('No active X3DH key bundles found for peer:', peerUserId);
         return null;
       }
-
-      const peerDeviceId = bundles[0].device_id;
       return await this.encryptMessageForPeer(plaintext, peerUserId, peerDeviceId);
     } catch (error) {
+      this.peerDeviceCache.delete(peerUserId);
       console.error('Failed to encrypt message for peer:', error);
       throw error;
     }
@@ -559,10 +593,17 @@ export class E2EEProService {
       if (session.sharedSecret) uniqueSecrets.add(session.sharedSecret);
     }
 
-    // Try every active session shared secret
-    for (const secret of uniqueSecrets) {
+    // Try the secret that worked last first; it matches almost every message in a conversation.
+    const preferred = this.lastWorkingSecretByPeer.get(peerUserId);
+    const ordered = preferred && uniqueSecrets.has(preferred)
+      ? [preferred, ...[...uniqueSecrets].filter((secret) => secret !== preferred)]
+      : [...uniqueSecrets];
+    for (const secret of ordered) {
       const decrypted = decryptMessageWithSharedSecret(ciphertext, nonce, secret);
-      if (decrypted) return decrypted;
+      if (decrypted) {
+        this.lastWorkingSecretByPeer.set(peerUserId, secret);
+        return decrypted;
+      }
     }
 
     // Fallback: try self-identity derived key for self-sent messages

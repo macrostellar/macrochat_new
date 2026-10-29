@@ -30,7 +30,7 @@ if (isNative && Notifications) {
         shouldShowBanner: isLocal,
         shouldShowList: isLocal,
         shouldPlaySound: false,
-        shouldSetBadge: true,
+        shouldSetBadge: false,
       };
     },
   });
@@ -93,14 +93,13 @@ async function presentNotification(
       content: {
         title,
         body,
-        badge: options.badge ? 1 : undefined,
         data: { category: options.category, local: true },
         ...(Platform.OS === 'android'
           ? { channelId: options.category === 'calls' ? CALL_CHANNEL_ID : MESSAGE_CHANNEL_ID }
           : {}),
       },
       trigger: null,
-    }).catch(() => undefined);
+    }).catch((error) => console.warn('Could not present local notification:', error));
     return;
   }
 

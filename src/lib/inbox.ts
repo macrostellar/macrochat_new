@@ -1,15 +1,17 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 // Payloads carry ids only; receivers fetch the row, so RLS still guards the content.
-export type InboxEvent = 'new-message' | 'new-chat';
+export type InboxEvent = 'new-message' | 'new-chat' | 'read-receipt';
 
 export const inboxTopic = (userId: string) => `macrochat-inbox-${userId}`;
 
-function sendToUser(client: SupabaseClient, userId: string, event: InboxEvent, payload: Record<string, string>) {
+async function sendToUser(client: SupabaseClient, userId: string, event: InboxEvent, payload: Record<string, string>) {
   const channel = client.channel(inboxTopic(userId));
-  channel.httpSend(event, payload)
-    .catch(() => undefined)
-    .finally(() => { void client.removeChannel(channel); });
+  try {
+    await channel.httpSend(event, payload);
+  } finally {
+    await client.removeChannel(channel);
+  }
 }
 
 // Pings the other members so they pick up a change without waiting on postgres_changes.
@@ -23,10 +25,11 @@ export async function notifyConversation(
 ) {
   let recipients: string[] = knownPeerId ? [knownPeerId] : [];
   if (recipients.length === 0) {
-    const { data } = await client.from('macrochat_conversation_members').select('user_id').eq('conversation_id', conversationId);
+    const { data, error } = await client.from('macrochat_conversation_members').select('user_id').eq('conversation_id', conversationId);
+    if (error) throw error;
     recipients = (data ?? []).map((row) => row.user_id as string);
   }
-  recipients
+  await Promise.all(recipients
     .filter((id) => id !== actorUserId)
-    .forEach((id) => sendToUser(client, id, event, { conversationId, ...payload }));
+    .map((id) => sendToUser(client, id, event, { conversationId, ...payload })));
 }

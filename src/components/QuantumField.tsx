@@ -339,7 +339,7 @@ const webGalaxyStyle = {
 
 const styles = StyleSheet.create({
   fallback: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: colors.navy950,
   },
 });

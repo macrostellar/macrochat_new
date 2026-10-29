@@ -164,7 +164,7 @@ export default function WelcomeScreen() {
                   <Text style={styles.recoverButtonText}>Recover existing account</Text>
                 </Pressable>
 
-                <View style={styles.security}><Ionicons name="shield-checkmark" color={colors.neon} size={16} /><Text style={styles.securityText}>Secure local identity · {backendMode === 'demo' ? 'Offline mode' : 'Online mode'}</Text></View>
+                <View style={styles.security}><Ionicons name="shield-checkmark" color={colors.neon} size={16} /><Text style={styles.securityText}>{backendMode === 'demo' ? 'Demo only - messages stay on this device' : 'Online identity - synced with MacroChat'}</Text></View>
               </View>
             </View>
           </Animated.View>

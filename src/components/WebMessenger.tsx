@@ -344,6 +344,8 @@ function Conversation({ chat }: { chat: Chat }) {
   const {
     chats,
     activityByChat,
+    setActiveChatId,
+    e2eePro,
     sendMessage,
     sendMediaMessage,
     sendChatActivity,
@@ -456,6 +458,13 @@ function Conversation({ chat }: { chat: Chat }) {
     return messages.filter((_, index) => searchMatches.includes(index));
   }, [messageSearchQuery, messages, searchMatches, showMessageSearch]);
   const activity = activityByChat[chat.id];
+  useEffect(() => {
+    setActiveChatId(chat.id);
+    return () => setActiveChatId(null);
+  }, [chat.id, setActiveChatId]);
+  useEffect(() => {
+    if (e2eePro && chat.participantUserId) void e2eePro.warmPeer(chat.participantUserId);
+  }, [e2eePro, chat.participantUserId]);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [manualActivityState, setManualActivityState] = useState<'recording' | 'screenshot' | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -2187,7 +2196,7 @@ const styles = StyleSheet.create({
   // PHOTO & VOICE NOTE STYLES
   photoThumbnail: { width: 240, height: 180, borderRadius: 8, marginTop: 2, marginBottom: 4 },
   videoBubbleContainer: { width: 260, maxWidth: '100%', maxHeight: 340, marginTop: 2, marginBottom: 4, borderRadius: 10, overflow: 'hidden', backgroundColor: '#050D16', alignItems: 'center', justifyContent: 'center' },
-  videoScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(3, 11, 20, 0.18)' },
+  videoScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(3, 11, 20, 0.18)' },
   videoPlayBadge: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(109, 245, 194, 0.95)', alignItems: 'center', justifyContent: 'center' },
   videoDurationPill: { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, backgroundColor: 'rgba(3, 11, 20, 0.66)' },
   videoDurationText: { color: colors.white, fontSize: 11, fontWeight: '700' },

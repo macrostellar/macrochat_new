@@ -10,8 +10,6 @@ try {
   // OK — running in Expo Go or push not available.
 }
 
-const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
-
 export const CALL_CHANNEL_ID = 'calls';
 export const MESSAGE_CHANNEL_ID = 'messages';
 
@@ -79,16 +77,16 @@ export async function registerPushToken(userId: string): Promise<string | null> 
   await configureNotificationChannels();
 
   const projectId = getProjectId();
-  if (!projectId || !supabase) return null;
+  if (!projectId || !supabase) throw new Error('Push registration requires the Expo project ID and a configured backend.');
 
   let token: string;
   try {
     token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(`Could not register this device for push notifications: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  await supabase
+  const { error } = await supabase
     .from('user_push_tokens')
     .upsert(
       {
@@ -98,17 +96,23 @@ export async function registerPushToken(userId: string): Promise<string | null> 
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'token' }
-    )
-    .then(() => undefined, () => undefined);
+    );
+  if (error) throw new Error(`Could not save this device's push token: ${error.message}`);
 
   return token;
 }
 
 export async function unregisterPushToken(token: string): Promise<void> {
   if (!supabase) return;
-  await supabase
+  const { error } = await supabase
     .from('user_push_tokens')
     .delete()
-    .eq('token', token)
-    .then(() => undefined, () => undefined);
+    .eq('token', token);
+  if (error) throw new Error(`Could not remove push token: ${error.message}`);
+}
+
+export async function setApplicationBadgeCount(count: number): Promise<void> {
+  if (!Notifications || Platform.OS === 'web') return;
+  const updated = await Notifications.setBadgeCountAsync(Math.max(0, Math.floor(count)));
+  if (!updated && Platform.OS === 'ios') console.warn('iOS did not allow updating the notification badge.');
 }

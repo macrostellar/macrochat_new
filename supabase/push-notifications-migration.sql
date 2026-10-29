@@ -42,10 +42,23 @@ declare
   fn_secret text := current_setting('app.settings.push_webhook_secret', true);
 begin
   if fn_url is null or fn_url = '' then
+    select decrypted_secret into fn_url from vault.decrypted_secrets
+      where name = 'macrochat_push_function_url' limit 1;
+  end if;
+  if fn_secret is null or fn_secret = '' then
+    select decrypted_secret into fn_secret from vault.decrypted_secrets
+      where name = 'macrochat_push_webhook_secret' limit 1;
+  end if;
+  if fn_url is null or fn_url = '' then
+    raise warning 'MacroChat push function URL is not configured';
+    return new;
+  end if;
+  if fn_secret is null or fn_secret = '' then
+    raise warning 'MacroChat push webhook secret is not configured';
     return new;
   end if;
 
-  perform extensions.net.http_post(
+  perform net.http_post(
     url := fn_url,
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
@@ -65,6 +78,7 @@ begin
 exception
   -- Never let a push failure roll back the message insert.
   when others then
+    raise warning 'MacroChat push dispatch failed: %', sqlerrm;
     return new;
 end;
 $$;
@@ -82,3 +96,6 @@ create trigger macrochat_messages_push
 -- alter database postgres set app.settings.push_function_url =
 --   'https://pofbkteiymgiwciamyll.supabase.co/functions/v1/send-push';
 -- alter database postgres set app.settings.push_webhook_secret = 'REPLACE_WITH_A_LONG_RANDOM_STRING';
+-- Alternatively, create Vault secrets named macrochat_push_function_url and
+-- macrochat_push_webhook_secret. Use the same secret as PUSH_WEBHOOK_SECRET
+-- on the send-push Edge Function. Do not put that secret in any EXPO_PUBLIC value.

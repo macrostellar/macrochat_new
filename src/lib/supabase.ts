@@ -3,13 +3,23 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
 import { createClient } from '@supabase/supabase-js';
+import { getBackendConfiguration } from './backend-config';
 
 WebBrowser.maybeCompleteAuthSession();
 
-const url = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+const url = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim();
+const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
 
-export const isSupabaseConfigured = Boolean(url && anonKey);
+const configuration = getBackendConfiguration({
+  url,
+  anonKey,
+  demoEnabled: process.env.EXPO_PUBLIC_DEMO_MODE,
+  development: __DEV__,
+});
+export const backendMode = configuration.mode;
+export const backendConfigurationError = configuration.error;
+export const isDemoMode = backendMode === 'demo';
+export const isSupabaseConfigured = backendMode === 'supabase';
 
 export const supabase = isSupabaseConfigured
   ? createClient(url!, anonKey!, {
@@ -58,13 +68,20 @@ function isNetworkFailure(error: unknown) {
 }
 
 export async function ensureAnonymousSession() {
-  if (!supabase) return null;
-  const { data: existing } = await supabase.auth.getSession();
+  if (!supabase) {
+    if (isDemoMode) return null;
+    throw new Error(backendConfigurationError ?? 'Online messaging is not configured.');
+  }
+  const { data: existing, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError) throw sessionError;
   if (existing.session) return existing.session;
 
   for (let attempt = 0; ; attempt += 1) {
     const { data, error } = await supabase.auth.signInAnonymously();
-    if (!error) return data.session;
+    if (!error) {
+      if (!data.session) throw new Error('The server did not create an authenticated session. Please try again.');
+      return data.session;
+    }
     if (!isNetworkFailure(error)) throw error;
     if (attempt >= NETWORK_RETRY_DELAYS_MS.length) {
       throw new Error('Could not reach MacroChat servers. Check your internet connection and try again.');

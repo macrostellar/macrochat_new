@@ -17,9 +17,9 @@ export function VideoThumbnail({ uri, onMeta }: { uri: string; onMeta: (meta: Me
       if (player.duration) onMeta({ durationMs: player.duration * 1000 });
       player.currentTime = 0.12;
     });
-    const sourceSub = player.addListener('sourceLoad', ({ videoSource }) => {
-      const width = videoSource?.naturalSize?.width ?? 0;
-      const height = videoSource?.naturalSize?.height ?? 0;
+    const sourceSub = player.addListener('sourceLoad', ({ availableVideoTracks }) => {
+      const width = availableVideoTracks[0]?.size.width ?? 0;
+      const height = availableVideoTracks[0]?.size.height ?? 0;
       if (width > 0 && height > 0) onMeta({ ratio: width / height });
     });
     return () => {
@@ -34,7 +34,7 @@ export function VideoThumbnail({ uri, onMeta }: { uri: string; onMeta: (meta: Me
       style={StyleSheet.absoluteFill}
       contentFit="contain"
       nativeControls={false}
-      allowsFullscreen={false}
+      fullscreenOptions={{ enable: false }}
       allowsPictureInPicture={false}
     />
   );
@@ -55,7 +55,7 @@ export function VideoPreviewPlayer({
     if (autoPlay) instance.play();
   });
 
-  return <VideoView player={player} style={style} contentFit="contain" nativeControls allowsFullscreen />;
+  return <VideoView player={player} style={style} contentFit="contain" nativeControls fullscreenOptions={{ enable: true }} />;
 }
 
 // Return actual video ratio without clamping - show videos in their TRUE original aspect ratio

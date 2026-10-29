@@ -2,12 +2,12 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { Alert, AppState, Platform } from 'react-native';
 import { DEFAULT_PROFILE_AVATARS } from '@/components/Avatar';
 import * as SecureStore from 'expo-secure-store';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import type { AppearanceSettings, CallHistoryEntry, CallOutcome, Chat, Message, MessageKind, Profile, ProfileStatus, UpdateItem, UpdateReaction, UpdateComment, MessageReaction, MessageComment, NotificationPreferences } from '@/types';
 import { defaultAppearanceSettings, defaultNotificationPreferences } from '@/types';
 import { demoChats } from '@/lib/demo';
 import { generateMacroId, localId } from '@/lib/id';
-import { ensureAnonymousSession, getSupabaseAccessToken, isSupabaseConfigured, supabase } from '@/lib/supabase';
+import { backendMode, ensureAnonymousSession, getSupabaseAccessToken, isDemoMode, supabase } from '@/lib/supabase';
 import { connectCallSignaling, disconnectCallSignaling, getCallSocket, updateCallHandlers } from '@/lib/calls';
 import { getIceServers, getWebRTC } from '@/lib/webrtc';
 import { defaultPrivacySettings, readPrivacySettings, writePrivacySettings, type BlockedContact, type PrivacySettings } from '@/lib/privacy';
@@ -22,11 +22,11 @@ import {
 import { encryptCallSignaling, decryptCallSignaling } from '@/lib/e2ee-calls';
 import { initializeE2EEProService, type E2EEProService } from '@/lib/e2ee-pro-service';
 import { triggerNotification, requestNotificationPermission, getCategoryFromMessage, stopCallAlert } from '@/lib/notifications';
-import { configureNotificationChannels, registerPushToken } from '@/lib/push';
+import { configureNotificationChannels, registerPushToken, unregisterPushToken, setApplicationBadgeCount } from '@/lib/push';
 import { useChatActivity } from '@/lib/useChatActivity';
 import { inboxTopic, notifyConversation } from '@/lib/inbox';
 
-const PROFILE_KEY = 'macrochat.profile';
+const PROFILE_KEY = isDemoMode ? 'macrochat.demo.profile' : 'macrochat.profile';
 const DEVICE_ID_KEY = 'macrochat.device_id';
 const APPEARANCE_KEY = 'macrochat.appearance';
 
@@ -39,7 +39,7 @@ type AppContextValue = {
   chats: Chat[];
   activityByChat: Record<string, { state: ChatActivityState; userId: string }>;
   presenceByUser: Record<string, { device?: DeviceKind; onlineAt: string; status: ProfileStatus }>;
-  backendMode: 'demo' | 'supabase';
+  backendMode: 'demo' | 'supabase' | 'unconfigured';
   signalingReady: boolean;
   signalingEnabled: boolean;
   activeCall: ActiveCall | null;
@@ -83,6 +83,7 @@ type AppContextValue = {
     replyTo?: string;
   }) => Promise<void>;
   sendChatActivity: (chatId: string, state: ChatActivityState | null) => void;
+  setActiveChatId: (chatId: string | null) => void;
   addChat: (macroId: string) => Promise<string>;
   markRead: (chatId: string) => void;
   refreshChats: () => Promise<void>;
@@ -194,9 +195,9 @@ async function fetchMessagePage(
     return filtered.order('created_at', { ascending: false }).limit(MESSAGE_PAGE_SIZE);
   };
 
-  let result: any = await run(BASE_MESSAGE_SELECT);
+  let result: any = await run(FULL_MESSAGE_SELECT);
   if (result.error && /pinned_at|starred_by_user_id|text_color|font_style|font_family|column .* does not exist/i.test(result.error.message ?? '')) {
-    const extended: any = await run(FULL_MESSAGE_SELECT);
+    const extended: any = await run(BASE_MESSAGE_SELECT);
     if (!extended.error) result = extended;
   }
 
@@ -261,7 +262,9 @@ function mapMessageRow(row: MessageRow, ctx: MessageMapContext): Message {
     text: displayText,
     kind: row.kind,
     mediaPath: row.media_path ?? undefined,
-    mediaUrl: mediaMeta.signedUrl || mediaMeta.dataUrl || (row.media_path ? (row.media_path.startsWith('data:') ? row.media_path : signedByPath.get(row.media_path)) : undefined),
+    mediaUrl: row.media_path && !/^(data:|https?:)/.test(row.media_path)
+      ? signedByPath.get(row.media_path)
+      : row.media_path || mediaMeta.dataUrl || mediaMeta.signedUrl || undefined,
     fileName: mediaMeta.name,
     mimeType: mediaMeta.mimeType,
     durationMs: mediaMeta.durationMs,
@@ -427,6 +430,11 @@ function base64ToUint8Array(base64: string) {
 }
 
 async function readUriAsUploadBody(uri: string) {
+  if (uri.startsWith('data:')) {
+    const match = /^data:[^,]*;base64,(.*)$/s.exec(uri);
+    if (!match) throw new Error('Unsupported attachment data URL.');
+    return base64ToUint8Array(match[1]);
+  }
   if (Platform.OS === 'web') {
     const response = await fetch(uri);
     return response.blob();
@@ -615,9 +623,11 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [appearanceSettings, setAppearanceSettings] = useState<AppearanceSettings>(defaultAppearanceSettings);
   const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
   const [fakeDeviceStatus, setFakeDeviceStatus] = useState<'mobile' | 'desktop' | 'web' | null>(null);
-  const { activityByChat, presenceByUser, sendChatActivity } = useChatActivity(chats, profile, privacySettings.showDeviceStatus, fakeDeviceStatus, privacySettings.shareTypingActivity);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const { activityByChat, presenceByUser, sendChatActivity } = useChatActivity(chats, profile, privacySettings.showDeviceStatus, fakeDeviceStatus, privacySettings.shareTypingActivity, activeChatId);
   const [notificationPrefs, setNotificationPrefs] = useState<NotificationPreferences>(defaultNotificationPreferences);
   const notificationPrefsRef = useRef(notificationPrefs);
+  const pushTokenRef = useRef<string | null>(null);
   useEffect(() => { notificationPrefsRef.current = notificationPrefs; }, [notificationPrefs]);
 
   const [pinnedChatIds, setPinnedChatIds] = useState<Set<string>>(new Set());
@@ -629,6 +639,19 @@ export function AppProvider({ children }: PropsWithChildren) {
   const mutedChatIdsRef = useRef(mutedChatIds);
   const clearedChatIdsRef = useRef(clearedChatIds);
   const deletedChatIdsRef = useRef(deletedChatIds);
+  const unreadBadgeCount = profile && notificationPrefs.badge
+    ? chats.reduce((count, chat) => count + (mutedChatIds.has(chat.id) ? 0 : chat.unread), 0)
+    : 0;
+  useEffect(() => {
+    const updateBadge = () => {
+      void setApplicationBadgeCount(unreadBadgeCount).catch((error) => console.warn('Failed to sync notification badge:', error));
+    };
+    updateBadge();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') updateBadge();
+    });
+    return () => subscription.remove();
+  }, [unreadBadgeCount]);
 
   useEffect(() => { pinnedChatIdsRef.current = pinnedChatIds; }, [pinnedChatIds]);
   useEffect(() => { mutedChatIdsRef.current = mutedChatIds; }, [mutedChatIds]);
@@ -638,10 +661,17 @@ export function AppProvider({ children }: PropsWithChildren) {
   // Periodically remove expired messages
   useEffect(() => {
     const interval = setInterval(() => {
-      setChats((current) => current.map((chat) => ({
-        ...chat,
-        messages: chat.messages.filter((msg) => !msg.expiresAt || new Date(msg.expiresAt).getTime() > Date.now()),
-      })));
+      const now = Date.now();
+      setChats((current) => {
+        let changed = false;
+        const next = current.map((chat) => {
+          const messages = chat.messages.filter((msg) => !msg.expiresAt || new Date(msg.expiresAt).getTime() > now);
+          if (messages.length === chat.messages.length) return chat;
+          changed = true;
+          return { ...chat, messages };
+        });
+        return changed ? next : current;
+      });
     }, 1000); // Check every second
     return () => clearInterval(interval);
   }, []);
@@ -650,9 +680,13 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const restoreProfile = useCallback(async () => {
     if (!supabase) return null;
-    const { data: sessionData } = await supabase.auth.getSession();
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError) throw sessionError;
     const userId = sessionData.session?.user.id;
-    if (!userId) return null;
+    if (!userId) {
+      setProfile(null);
+      return null;
+    }
 
     const { data, error } = await supabase
       .from('macrochat_profiles')
@@ -680,7 +714,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       return restored;
     }
     if (error) throw toReadableDbError('Restoring account profile failed', error);
-    if (!data) return null;
+    if (!data) {
+      setProfile(null);
+      return null;
+    }
 
     const restored: Profile = {
       id: data.id,
@@ -695,14 +732,21 @@ export function AppProvider({ children }: PropsWithChildren) {
     return restored;
   }, []);
 
+  const profileUserId = profile?.id;
   const refreshSecurityState = useCallback(async () => {
     const localPassphrase = await readE2EEPassphrase();
     setE2eePassphrase(localPassphrase);
 
-    if (!supabase) {
+    if (!supabase || !profileUserId) {
       setMfaAal2(false);
       return;
     }
+
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError) throw sessionError;
+    const userId = sessionData.session?.user.id;
+    // Authentication can finish before registration creates the parent profile row.
+    if (!userId || userId !== profileUserId) return;
 
     try {
       const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
@@ -713,13 +757,11 @@ export function AppProvider({ children }: PropsWithChildren) {
       // Fallback below
     }
 
-    const { data: sessionData } = await supabase.auth.getSession();
     const aal = sessionData.session?.user?.app_metadata?.aal ?? sessionData.session?.user?.user_metadata?.aal;
     setMfaAal2(aal === 'aal2');
 
     // Initialize E2EE Pro service
     try {
-      const userId = sessionData.session?.user.id;
       // Re-runs when the signed-in user changes, otherwise a second account in the
       // same session never publishes its X3DH key bundle.
       if (userId && e2eeProUserIdRef.current !== userId) {
@@ -731,9 +773,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         setE2eePro(service);
       }
     } catch (error) {
-      // Silently fail in production
+      console.error('Failed to initialize message encryption:', error);
     }
-  }, []);
+  }, [profileUserId]);
 
   const refreshPrivacyState = useCallback(async () => {
     const local = await readPrivacySettings();
@@ -1227,11 +1269,12 @@ export function AppProvider({ children }: PropsWithChildren) {
       conversationIds.map((conversationId, index): [string, MessageRow[]] => [conversationId, messagePages[index].rows]),
     );
     const messages = messagePages.flatMap((page) => page.rows);
-    const mediaPaths = [...new Set(messages.map((row) => row.media_path).filter((path): path is string => typeof path === 'string' && Boolean(path) && !path.startsWith('data:')))];
+    const mediaPaths = [...new Set(messages.map((row) => row.media_path).filter((path): path is string => typeof path === 'string' && Boolean(path) && !/^(data:|https?:)/.test(path)))];
     const signedByPath = new Map<string, string>();
 
     if (mediaPaths.length > 0) {
       const signedRes = await supabase.storage.from('macrochat-media').createSignedUrls(mediaPaths, 60 * 5);
+      if (signedRes.error) console.warn('Failed to resolve message media:', signedRes.error.message);
       if (!signedRes.error && signedRes.data) {
         mediaPaths.forEach((path, index) => {
           const signedUrl = signedRes.data?.[index]?.signedUrl;
@@ -1422,7 +1465,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       displayText = mediaMeta.name || mediaMeta.text || row.body || row.kind;
     }
 
-    const mediaUrl = mediaMeta.signedUrl || mediaMeta.dataUrl || (row.media_path && row.media_path.startsWith('data:') ? row.media_path : undefined);
+    const mediaUrl = row.media_path
+      ? (/^(data:|https?:)/.test(row.media_path) ? row.media_path : undefined)
+      : mediaMeta.dataUrl || mediaMeta.signedUrl;
 
     const incoming: Message = {
       id: row.id,
@@ -1478,7 +1523,11 @@ export function AppProvider({ children }: PropsWithChildren) {
         return {
           ...chat,
           messages: chat.messages.map((m) => m === existing
-            ? { ...m, ...incoming, text: preservedText, clientId: incoming.clientId ?? m.clientId, status: 'sent', mediaUrl: incoming.mediaUrl || m.mediaUrl }
+            ? {
+                ...m, ...incoming, text: preservedText, clientId: incoming.clientId ?? m.clientId,
+                status: m.status === 'read' ? 'read' : incoming.status,
+                mediaUrl: incoming.mediaUrl || m.mediaUrl,
+              }
             : m),
         };
       }
@@ -1517,7 +1566,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       otherReceiptReadAt = (data?.receipt_read_at as string | null | undefined) ?? null;
     }
 
-    const mediaPaths = [...new Set(page.rows.map((row) => row.media_path).filter((path): path is string => typeof path === 'string' && Boolean(path) && !path.startsWith('data:')))];
+    const mediaPaths = [...new Set(page.rows.map((row) => row.media_path).filter((path): path is string => typeof path === 'string' && Boolean(path) && !/^(data:|https?:)/.test(path)))];
     const signedByPath = new Map<string, string>();
     if (mediaPaths.length > 0) {
       const signedRes = await client.storage.from('macrochat-media').createSignedUrls(mediaPaths, 60 * 5);
@@ -1552,15 +1601,23 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [chats, e2eePassphrase, e2eePro, profile]);
 
   useEffect(() => {
-    readProfileFromStorage()
-      .then(async (saved) => {
-        if (saved) {
-          setProfile(JSON.parse(saved) as Profile);
-        } else {
-          await restoreProfile();
-        }
+    const loadProfile = async () => {
+      if (!supabase) {
+        const saved = await readProfileFromStorage();
+        if (isDemoMode && saved) setProfile(JSON.parse(saved) as Profile);
+        return;
+      }
+      const restored = await restoreProfile();
+      if (!restored) {
+        setProfile(null);
+        await clearProfileFromStorage();
+      }
+    };
+    Promise.resolve().then(loadProfile)
+      .catch((error) => {
+        console.error('Failed to restore account profile:', error);
+        Alert.alert('Profile could not be refreshed', error instanceof Error ? error.message : 'Check your connection and try again.');
       })
-      .catch(() => undefined)
       .finally(() => setLoading(false));
 
     readAppearanceSettingsFromStorage()
@@ -1600,8 +1657,19 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [restoreProfile]);
 
   useEffect(() => {
-    refreshSecurityState().catch(() => undefined);
+    Promise.resolve().then(refreshSecurityState)
+      .catch((error) => console.error('Failed to refresh account security:', error));
   }, [refreshSecurityState, profile?.id]);
+
+  useEffect(() => {
+    if (!supabase || !profile?.id) return;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      void restoreProfile().catch((error) => console.warn('Failed to refresh account profile:', error));
+      void refreshSecurityState().catch((error) => console.warn('Failed to refresh message encryption:', error));
+    });
+    return () => subscription.remove();
+  }, [profile?.id, restoreProfile, refreshSecurityState]);
 
   useEffect(() => {
     refreshPrivacyState().catch((error) => console.warn('Failed to refresh privacy settings', error));
@@ -1646,12 +1714,21 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!profile) return;
     // Ask once, then register this device so pushes arrive while the app is closed.
-    void (async () => {
+    const userId = profile.id;
+    const register = async () => {
       await requestNotificationPermission();
-      await configureNotificationChannels().catch(() => undefined);
-      await registerPushToken(profile.id).catch(() => undefined);
-    })();
-  }, [profile]);
+      await configureNotificationChannels();
+      pushTokenRef.current = await registerPushToken(userId);
+    };
+    void register().catch((error) => {
+      console.error('Push notification setup failed:', error);
+      Alert.alert('Background notifications unavailable', 'This device could not register for push notifications. Check notification permission and the app’s push configuration, then reopen the app.');
+    });
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void register().catch((error) => console.warn('Push registration retry failed:', error));
+    });
+    return () => subscription.remove();
+  }, [profile?.id]);
 
   const realtimeHandlers = useRef({ loadChatsFromBackend, mergeRealtimeMessage, refreshMessageReactions, chats });
   const realtimeUserId = profile?.id;
@@ -1664,7 +1741,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [e2eePro, e2eePassphrase]);
 
   useEffect(() => {
-    if (!supabase) { setChats(demoChats); return; }
+    if (!supabase) { setChats(isDemoMode ? demoChats : []); return; }
     if (!realtimeUserId) { setChats([]); return; }
     // Full reloads run on login, reconnect, and membership changes. Message events are applied directly.
     let disposed = false;
@@ -1679,8 +1756,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       reloading = true;
       try {
         await realtimeHandlers.current.loadChatsFromBackend();
-      } catch {
-        // Next trigger retries.
+      } catch (error) {
+        console.warn('Failed to refresh chats:', error);
       } finally {
         reloading = false;
         if (reloadQueued && !disposed) {
@@ -1697,8 +1774,9 @@ export function AppProvider({ children }: PropsWithChildren) {
 
     // Signs the media URL for a message that arrived without one, then patches it into state.
     const signMediaForRow = async (row: MessageRow) => {
-      if (!supabase || !row.media_path || row.media_path.startsWith('data:')) return;
-      const { data } = await supabase.storage.from('macrochat-media').createSignedUrl(row.media_path, 60 * 5);
+      if (!supabase || !row.media_path || /^(data:|https?:)/.test(row.media_path)) return;
+      const { data, error } = await supabase.storage.from('macrochat-media').createSignedUrl(row.media_path, 60 * 5);
+      if (error) console.warn('Failed to resolve incoming attachment:', error.message);
       const signedUrl = data?.signedUrl;
       if (!signedUrl) return;
       setChats((current) => current.map((chat) => {
@@ -1722,6 +1800,38 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (row.kind !== 'text') void signMediaForRow(row);
     };
 
+    const applyReceipt = (member: { conversation_id?: string; user_id?: string; receipt_read_at?: string | null }) => {
+      if (!member.conversation_id || !member.receipt_read_at || member.user_id === realtimeUserId) return;
+      const receiptTime = new Date(member.receipt_read_at).getTime();
+      setChats((current) => {
+        let changed = false;
+        const next = current.map((chat) => {
+          if (chat.id !== member.conversation_id || chat.isGroup || chat.participantUserId !== member.user_id) return chat;
+          let chatChanged = false;
+          const messages = chat.messages.map((message) => {
+            if (message.senderId !== 'me' || message.status === 'read' || message.status === 'sending' || message.status === 'failed'
+              || new Date(message.createdAt).getTime() > receiptTime) return message;
+            chatChanged = true;
+            return { ...message, status: 'read' as const };
+          });
+          if (!chatChanged) return chat;
+          changed = true;
+          return { ...chat, messages };
+        });
+        return changed ? next : current;
+      });
+    };
+    const fetchReceipts = async (conversationIds: string[]) => {
+      if (!supabase || conversationIds.length === 0) return;
+      const { data, error } = await supabase.from('macrochat_conversation_members')
+        .select('conversation_id,user_id,receipt_read_at')
+        .in('conversation_id', conversationIds);
+      if (error) throw error;
+      data?.forEach(applyReceipt);
+    };
+
+    let syncChannelJoined = false;
+    let inboxChannelJoined = false;
     const channel = supabase.channel(`macrochat-sync-${realtimeUserId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'macrochat_messages' }, (change) => {
         const nextRow = change.new as MessageRow;
@@ -1761,28 +1871,13 @@ export function AppProvider({ children }: PropsWithChildren) {
         // Read receipts from the other member: mark my messages at or before their receipt as read.
         const member = change.new as { conversation_id?: string; user_id?: string; receipt_read_at?: string | null };
         if (!member.conversation_id || !member.receipt_read_at || member.user_id === realtimeUserId) return;
-        const conversationId = member.conversation_id;
-        const receiptTime = new Date(member.receipt_read_at).getTime();
-        setChats((current) => current.map((chat) => {
-          if (chat.id !== conversationId || chat.isGroup) return chat;
-          return {
-            ...chat,
-            messages: chat.messages.map((message) => (
-              message.senderId === 'me'
-              && message.status !== 'read'
-              && message.status !== 'sending'
-              && message.status !== 'failed'
-              && new Date(message.createdAt).getTime() <= receiptTime
-                ? { ...message, status: 'read' as const }
-                : message
-            )),
-          };
-        }));
+        applyReceipt(member);
       })
       .subscribe((status) => {
         console.log('[Realtime] chat sync channel status:', status);
+        syncChannelJoined = status === 'SUBSCRIBED';
         if (status === 'SUBSCRIBED') void reload();
-        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') void poll();
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') void poll();
       });
 
     // Senders ping this channel right after their insert, so delivery skips per-event RLS evaluation.
@@ -1802,38 +1897,51 @@ export function AppProvider({ children }: PropsWithChildren) {
           void reload();
           return;
         }
-        void fetchAndIngest(messageId).catch(() => undefined);
+        void fetchAndIngest(messageId).catch((error) => console.warn('Inbox message fetch failed:', error));
       })
       .on('broadcast', { event: 'new-chat' }, () => {
         void reload();
       })
-      .subscribe();
+      .on('broadcast', { event: 'read-receipt' }, ({ payload }) => {
+        const conversationId = payload?.conversationId;
+        if (typeof conversationId !== 'string') return;
+        void fetchReceipts([conversationId]).catch((error) => console.warn('Read receipt refresh failed:', error));
+      })
+      .subscribe((status) => {
+        const wasJoined = inboxChannelJoined;
+        inboxChannelJoined = status === 'SUBSCRIBED';
+        if (status === 'SUBSCRIBED' && !wasJoined) void poll();
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') void poll();
+      });
 
     // Fallback sync so messages and new chats still arrive when realtime is slow, blocked or dropped.
-    let lastPolledAt = new Date(Date.now() - 60_000).toISOString();
+    let lastPolledAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    let lastPolledId: string | null = null;
     let seenConversationIds: Set<string> | null = null;
     let polling = false;
     async function poll() {
       if (!supabase || polling || disposed) return;
       polling = true;
       try {
-        const run = (select: string) => supabase!
-          .from('macrochat_messages')
-          .select(select)
-          .gt('created_at', lastPolledAt)
-          .order('created_at', { ascending: true })
-          .limit(100);
+        const run = (select: string) => {
+          const query = supabase!.from('macrochat_messages').select(select);
+          const afterCursor = lastPolledId
+            ? query.or(`created_at.gt.${lastPolledAt},and(created_at.eq.${lastPolledAt},id.gt.${lastPolledId})`)
+            : query.gt('created_at', lastPolledAt);
+          return afterCursor.order('created_at', { ascending: true }).order('id', { ascending: true }).limit(100);
+        };
         const [messageResFull, membershipRes] = await Promise.all([
           run(FULL_MESSAGE_SELECT),
           supabase.from('macrochat_conversation_members').select('conversation_id').eq('user_id', realtimeUserId),
         ]);
         const messageRes: any = messageResFull.error ? await run(BASE_MESSAGE_SELECT) : messageResFull;
+        await fetchReceipts(realtimeHandlers.current.chats.map((chat) => chat.id));
 
         if (!membershipRes.error) {
           const ids = new Set((membershipRes.data ?? []).map((row) => row.conversation_id as string));
           const hasNewConversation = seenConversationIds !== null && [...ids].some((id) => !seenConversationIds!.has(id));
           seenConversationIds = ids;
-          if (hasNewConversation) void reload();
+          if (hasNewConversation) await reload();
         }
 
         if (!messageRes.error) {
@@ -1848,28 +1956,38 @@ export function AppProvider({ children }: PropsWithChildren) {
             if (known) continue;
             ingestRow(row);
           }
-          const newest = rows[rows.length - 1]?.created_at;
-          if (newest) lastPolledAt = newest;
+          const newest = rows[rows.length - 1];
+          if (newest) {
+            lastPolledAt = newest.created_at;
+            lastPolledId = newest.id;
+          }
         }
-      } catch {
-        // Next tick retries.
+      } catch (error) {
+        console.warn('Message sync failed; retrying on next poll:', error);
       } finally {
         polling = false;
       }
     }
 
-    let tick = 0;
+    // Poll every 3s while a realtime channel is down; once both are joined, a 15s safety net is enough.
+    let pollTick = 0;
     const pollTimer = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
-      // Poll fast while realtime is down, and slowly as a safety net while it is joined.
-      if (channel.state === 'joined' && ++tick % 4 !== 0) return;
+      if (Platform.OS !== 'web' && AppState.currentState !== 'active') return;
+      pollTick += 1;
+      if (syncChannelJoined && inboxChannelJoined && pollTick % 5 !== 0) return;
       void poll();
-    }, 5000);
+    }, 3000);
+    const mediaRefreshTimer = setInterval(() => {
+      if (Platform.OS !== 'web' && AppState.currentState !== 'active') return;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (realtimeHandlers.current.chats.some((chat) => chat.messages.some((message) => message.mediaPath && !message.mediaPath.startsWith('data:')))) void reload();
+    }, 4 * 60_000);
     void poll();
 
     const resync = () => {
       if (typeof document !== 'undefined' && document.hidden) return;
-      if (channel.state !== 'joined') void reload();
+      void reload();
       void poll();
     };
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', resync);
@@ -1885,6 +2003,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     return () => {
       disposed = true;
       clearInterval(pollTimer);
+      clearInterval(mediaRefreshTimer);
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', resync);
       if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
         window.removeEventListener('online', resync);
@@ -2492,6 +2611,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   const register = useCallback(async (displayName: string) => {
     const session = await ensureAnonymousSession();
+    if (session) {
+      const existing = await restoreProfile();
+      if (existing) return existing;
+    }
     const next: Profile = {
       id: session?.user.id ?? localId('anonymous'),
       macroId: generateMacroId(),
@@ -2516,10 +2639,14 @@ export function AppProvider({ children }: PropsWithChildren) {
     await writeProfileToStorage(next);
     setProfile(next);
     return next;
-  }, []);
+  }, [restoreProfile]);
 
   const signOut = useCallback(async () => {
     console.log('[SignOut] Starting complete sign-out...');
+    if (pushTokenRef.current) {
+      await unregisterPushToken(pushTokenRef.current);
+      pushTokenRef.current = null;
+    }
     
     // Clear app state first
     await clearProfileFromStorage();
@@ -2532,7 +2659,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     setMfaAal2(false);
     setE2eePro(null);
     e2eeProUserIdRef.current = null;
-    setChats(isSupabaseConfigured ? [] : demoChats);
+    setChats(isDemoMode ? demoChats : []);
 
     // Sign out from Supabase
     try {
@@ -2817,6 +2944,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   const sendMessage = useCallback((chatId: string, text: string, replyTo?: string, options?: { textColor?: string; fontStyle?: 'normal' | 'italic'; fontFamily?: string }) => {
     const payload = text.trim();
     if (!payload) return;
+    if (!isDemoMode && (!supabase || !profile)) {
+      Alert.alert('Message not sent', 'Online messaging needs a configured server and a signed-in account.');
+      return;
+    }
 
     const chatSpecificTtl = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
     const disappearingSeconds = chatSpecificTtl ?? privacySettings.defaultMessageTtlSeconds;
@@ -2928,7 +3059,7 @@ export function AppProvider({ children }: PropsWithChildren) {
                 ? { 
                     ...item, 
                     id: realId, 
-                    status: 'sent' as const,
+                    status: item.status === 'read' ? 'read' as const : 'sent' as const,
                     encrypted: true,
                     ciphertext: finalCiphertext,
                     nonce: finalNonce,
@@ -2940,9 +3071,7 @@ export function AppProvider({ children }: PropsWithChildren) {
                 : item),
             };
           }));
-        } else {
-          updateLocalMessageStatus('sent');
-        }
+        } else throw new Error('The server did not confirm the message was saved. Please try again.');
       }).catch((error) => {
         updateLocalMessageStatus('failed');
         Alert.alert('Message not sent', error instanceof Error ? error.message : 'End-to-end encryption failed.');
@@ -2961,9 +3090,12 @@ export function AppProvider({ children }: PropsWithChildren) {
     durationMs?: number;
     replyTo?: string;
   }) => {
+    if (!isDemoMode && (!supabase || !profile)) {
+      throw new Error('Online messaging needs a configured server and a signed-in account.');
+    }
     const chatSpecificTtl = chats.find((chat) => chat.id === chatId)?.disappearingSeconds;
     const disappearingSeconds = chatSpecificTtl ?? privacySettings.defaultMessageTtlSeconds;
-    const portableUri = await ensurePortableDataUrl(input.uri, input.mimeType);
+    const portableUri = isDemoMode ? await ensurePortableDataUrl(input.uri, input.mimeType) : input.uri;
 
     // Immutable client-side ID that never changes, even after the server assigns a UUID
     const clientId = `message-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
@@ -3005,39 +3137,27 @@ export function AppProvider({ children }: PropsWithChildren) {
     try {
       const actorUserId = await getAuthenticatedUserId(supabase);
       const contentType = input.mimeType || 'application/octet-stream';
-      let path: string | undefined = undefined;
-      let signedUrl: string | undefined = undefined;
-
-      try {
-        const uploadBody = await readUriAsUploadBody(portableUri);
-        const ext = inferExtension(input.fileName, input.mimeType || undefined);
-        const candidatePath = `${chatId}/${actorUserId}/${Date.now()}-${clientId}.${ext}`;
-
-        const uploadRes = await supabase.storage.from('macrochat-media').upload(candidatePath, uploadBody, {
-          contentType,
-          upsert: false,
-        });
-        if (uploadRes.error) {
-          // Upload failed, fall back to data URI
-        } else {
-          const signedRes = await supabase.storage.from('macrochat-media').createSignedUrl(candidatePath, 60 * 60 * 24);
-          if (signedRes.data?.signedUrl) {
-            path = candidatePath;
-            signedUrl = signedRes.data.signedUrl;
-          }
-        }
-      } catch (storageErr) {
-        // Silently fall back to data URI
+      const uploadBody = await readUriAsUploadBody(input.uri);
+      const ext = inferExtension(input.fileName, input.mimeType || undefined);
+      const candidatePath = `${chatId}/${actorUserId}/${Date.now()}-${clientId}.${ext}`;
+      const uploadRes = await supabase.storage.from('macrochat-media').upload(candidatePath, uploadBody, {
+        contentType,
+        upsert: false,
+      });
+      if (uploadRes.error) throw toReadableDbError('Uploading attachment failed', uploadRes.error);
+      const signedRes = await supabase.storage.from('macrochat-media').createSignedUrl(candidatePath, 60 * 5);
+      if (signedRes.error || !signedRes.data?.signedUrl) {
+        throw toReadableDbError('Loading uploaded attachment failed', signedRes.error);
       }
+      const signedUrl = signedRes.data.signedUrl;
 
       const mediaBody = JSON.stringify({
         name: input.fileName || input.kind,
         durationMs: input.durationMs,
         mimeType: contentType,
-        ...(signedUrl ? { signedUrl } : {}),
       });
 
-      const finalMediaPath = path || portableUri;
+      const finalMediaPath = candidatePath;
       const isValidUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.replyTo || '');
 
       const insertRes = await supabase.from('macrochat_messages').insert({
@@ -3065,7 +3185,7 @@ export function AppProvider({ children }: PropsWithChildren) {
               messages: chat.messages.map((item) => item.clientId === clientId ? { ...item, id: realId } : item),
             }
           : chat));
-      }
+      } else throw new Error('The server did not confirm the media message was saved. Please try again.');
 
       updateLocalMessage({
         status: 'sent',
@@ -3074,8 +3194,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         mimeType: contentType,
       });
     } catch (error) {
-      updateLocalMessage({ status: 'sent' });
-      console.warn('Media message sync warning', error instanceof Error ? error.message : error);
+      updateLocalMessage({ status: 'failed' });
+      console.warn('Media message not sent', error instanceof Error ? error.message : error);
+      throw error;
     }
   }, [chats, profile, privacySettings.defaultMessageTtlSeconds, scheduleLastSeenUpdate]);
 
@@ -3085,15 +3206,16 @@ export function AppProvider({ children }: PropsWithChildren) {
     const existing = chats.find((chat) => chat.macroId === normalized);
     if (existing) return existing.id;
 
-    const seedLocalChat = (conversationId: string, participantUserId: string) => {
+    const seedLocalChat = (conversationId: string, participant: { id: string; display_name?: string; avatar_color?: string; avatar_url?: string | null }) => {
       setChats((current) => {
         if (current.some((chat) => chat.id === conversationId)) return current;
         return [{
           id: conversationId,
-          name: normalized.replace('MC-', '').replace('-', ' '),
+          name: participant.display_name || normalized,
           macroId: normalized,
-          participantUserId,
-          avatarColor: '#71F79F',
+          participantUserId: participant.id,
+          avatarColor: participant.avatar_color || '#71F79F',
+          avatarUrl: participant.avatar_url || undefined,
           online: false,
           lastSeen: 'new contact',
           unread: 0,
@@ -3103,6 +3225,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     };
 
     if (!supabase || !profile) {
+      if (!isDemoMode) throw new Error('Starting a chat requires a configured server and a signed-in account.');
       const id = localId('chat');
       setChats((current) => [{
         id,
@@ -3134,7 +3257,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       target_macro_id: normalized,
     });
 
-    let target: { id: string } | null = Array.isArray(lookup) ? (lookup[0] as { id: string } | null) : null;
+    type ContactProfile = { id: string; display_name?: string; avatar_color?: string; avatar_url?: string | null };
+    let target: ContactProfile | null = Array.isArray(lookup) ? (lookup[0] as ContactProfile | null) : null;
 
     if (lookupError) {
       const message = (lookupError.message || '').toLowerCase();
@@ -3147,7 +3271,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       // Dev fallback: if RPC migration has not been applied yet, read directly.
       const directLookupRes = await supabase
         .from('macrochat_profiles')
-        .select('id')
+        .select('id,display_name,avatar_color,avatar_url')
         .eq('macro_id', normalized)
         .limit(1)
         .maybeSingle();
@@ -3156,7 +3280,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         throw toReadableDbError('Profile lookup fallback failed', directLookupRes.error);
       }
 
-      target = directLookupRes.data ? { id: directLookupRes.data.id } : null;
+      target = directLookupRes.data;
     }
 
     if (!target?.id) throw new Error('Macro ID was not found.');
@@ -3189,8 +3313,9 @@ export function AppProvider({ children }: PropsWithChildren) {
           .limit(1)
           .maybeSingle();
 
+        if (directConversationRes.error) throw toReadableDbError('Reading private conversation failed', directConversationRes.error);
         if (directConversationRes.data?.id) {
-          seedLocalChat(directConversationRes.data.id, target.id);
+          seedLocalChat(directConversationRes.data.id, target);
           loadChatsFromBackend().catch((error) => {
             console.warn('Failed to refresh chats after finding existing conversation', error);
           });
@@ -3210,13 +3335,12 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
 
     const conversationId = createConversationRes.data.id;
-    seedLocalChat(conversationId, target.id);
-
     const memberInsertRes = await supabase.from('macrochat_conversation_members').insert([
       { conversation_id: conversationId, user_id: actorUserId, role: 'admin' },
       { conversation_id: conversationId, user_id: target.id, role: 'member' },
     ]);
     if (memberInsertRes.error) throw toReadableDbError('Adding conversation members failed', memberInsertRes.error);
+    seedLocalChat(conversationId, target);
     void notifyConversation(supabase, conversationId, actorUserId, 'new-chat', {}, target.id).catch(() => undefined);
     if (privacySettings.defaultMessageTtlSeconds) {
       const timerUpdate = await supabase
@@ -3233,7 +3357,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [blockedContacts, chats, loadChatsFromBackend, privacySettings.defaultMessageTtlSeconds, profile]);
 
   const markRead = useCallback((chatId: string) => {
-    setChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, unread: 0 } : chat));
+    setChats((current) => {
+      if (!current.some((chat) => chat.id === chatId && chat.unread > 0)) return current;
+      return current.map((chat) => chat.id === chatId ? { ...chat, unread: 0 } : chat);
+    });
     if (supabase && profile) {
       const client = supabase;
       void (async () => {
@@ -3247,7 +3374,11 @@ export function AppProvider({ children }: PropsWithChildren) {
             })
             .eq('conversation_id', chatId)
             .eq('user_id', actorUserId);
-          if (error) console.warn('Failed to mark read', error.message);
+          if (error) throw error;
+          if (privacySettings.readReceipts) {
+            await notifyConversation(client, chatId, actorUserId, 'read-receipt', {},
+              realtimeHandlers.current.chats.find((chat) => chat.id === chatId)?.participantUserId);
+          }
         } catch (error) {
           console.warn('markRead session failed', error);
         }
@@ -3338,7 +3469,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     chats: chatsWithPresence,
     activityByChat,
     presenceByUser,
-    backendMode: isSupabaseConfigured ? 'supabase' as const : 'demo' as const,
+    backendMode,
     signalingReady,
     signalingEnabled,
     activeCall,
@@ -3375,6 +3506,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     deleteChat,
     sendMediaMessage,
     sendChatActivity,
+    setActiveChatId,
     logChatSystemMessage,
     addChat,
     markRead,
@@ -3454,6 +3586,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     deleteChat,
     sendMediaMessage,
     sendChatActivity,
+    setActiveChatId,
     logChatSystemMessage,
     addChat,
     markRead,

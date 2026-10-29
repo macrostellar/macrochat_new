@@ -21,6 +21,7 @@ type ApprovalsContextValue = {
   groups: ApprovalGroup[];
   requests: ApprovalRequest[];
   loading: boolean;
+  error: string | null;
   /** Open requests that are waiting on my decision. */
   pendingForMe: number;
   refreshApprovals: () => Promise<void>;
@@ -33,6 +34,11 @@ type ApprovalsContextValue = {
 };
 
 const ApprovalsContext = createContext<ApprovalsContextValue | null>(null);
+
+function approvalClient() {
+  if (!supabase) throw new Error('Approvals require a configured server and a signed-in account.');
+  return supabase;
+}
 
 // A new decision or edit re-alerts the approvers still waiting on a request.
 function approvalAlertKey(request: ApprovalRequest) {
@@ -100,6 +106,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
   const [groups, setGroups] = useState<ApprovalGroup[]>([]);
   const [requests, setRequests] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [dataOwner, setDataOwner] = useState<string | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenAwaitingRef = useRef<{ owner: string; keys: Set<string> } | null>(null);
@@ -107,12 +114,13 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
   const notificationPrefsRef = useRef(notificationPrefs);
   useEffect(() => { notificationPrefsRef.current = notificationPrefs; }, [notificationPrefs]);
 
-  const isDemo = backendMode === 'demo' || !supabase;
+  const isDemo = backendMode === 'demo';
 
   // Reset (or seed, in demo mode) whenever the signed-in profile changes.
   const currentOwner = profile?.id ?? null;
   if (dataOwner !== currentOwner) {
     setDataOwner(currentOwner);
+    setError(null);
     if (currentOwner && isDemo && profile) {
       const seed = demoSeed(profile.displayName, profile.avatarColor);
       setGroups(seed.groups);
@@ -170,8 +178,9 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       }
       setGroups(snapshot.groups);
       setRequests(snapshot.requests);
+      setError(null);
     } catch (error) {
-      // Table missing (migration not yet run) is a quiet failure: feature just shows empty.
+      setError(error instanceof Error ? error.message : 'Approvals could not be loaded. Check your connection and server setup.');
       console.warn('Failed to load approvals:', error instanceof Error ? error.message : error);
     } finally {
       setLoading(false);
@@ -205,7 +214,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
 
   const createApprovalGroup = useCallback<ApprovalsContextValue['createApprovalGroup']>(async (input) => {
     if (!profile) throw new Error('Sign in first.');
-    if (isDemo || !supabase) {
+    if (isDemo) {
       const id = `demo-group-${Date.now()}`;
       const group: ApprovalGroup = {
         id,
@@ -227,13 +236,13 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       setGroups((current) => [group, ...current]);
       return id;
     }
-    const id = await createApprovalGroupRemote(supabase, input);
+    const id = await createApprovalGroupRemote(approvalClient(), input);
     await Promise.all([refreshApprovals(), refreshChats()]);
     return id;
   }, [profile, isDemo, refreshApprovals, refreshChats]);
 
   const updateApprovalMembers = useCallback<ApprovalsContextValue['updateApprovalMembers']>(async (groupId, changes) => {
-    if (isDemo || !supabase) {
+    if (isDemo) {
       setGroups((current) => current.map((group) => {
         if (group.id !== groupId) return group;
         let members = group.members.filter((member) => !changes.remove?.includes(member.userId));
@@ -250,13 +259,13 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       }));
       return;
     }
-    await updateApprovalMembersRemote(supabase, groupId, changes);
+    await updateApprovalMembersRemote(approvalClient(), groupId, changes);
     await Promise.all([refreshApprovals(), refreshChats()]);
   }, [isDemo, refreshApprovals, refreshChats]);
 
   const createApprovalRequest = useCallback<ApprovalsContextValue['createApprovalRequest']>(async (input) => {
     if (!profile) throw new Error('Sign in first.');
-    if (isDemo || !supabase) {
+    if (isDemo) {
       const group = groups.find((item) => item.id === input.groupId);
       if (!group) throw new Error('Pick an approval group.');
       const id = `demo-req-${Date.now()}`;
@@ -289,7 +298,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       setRequests((current) => [request, ...current]);
       return id;
     }
-    const id = await createApprovalRequestRemote(supabase, input);
+    const id = await createApprovalRequestRemote(approvalClient(), input);
     await Promise.all([refreshApprovals(), refreshChats()]);
     return id;
   }, [profile, isDemo, groups, refreshApprovals, refreshChats]);
@@ -298,7 +307,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
     const request = requests.find((item) => item.id === requestId);
     if (!request || !profile) throw new Error('Request not found.');
     if (request.status !== 'pending') throw new Error('Only pending requests can be edited.');
-    if (isDemo || !supabase) {
+    if (isDemo) {
       const now = new Date().toISOString();
       setRequests((current) => current.map((item) => (item.id === requestId ? {
         ...item,
@@ -319,14 +328,14 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       } : item)));
       return;
     }
-    await updateApprovalRequestRemote(supabase, request, input);
+    await updateApprovalRequestRemote(approvalClient(), request, input);
     await Promise.all([refreshApprovals(), refreshChats()]);
   }, [requests, profile, isDemo, refreshApprovals, refreshChats]);
 
   const submitApprovalDecision = useCallback<ApprovalsContextValue['submitApprovalDecision']>(async (requestId, input) => {
     const request = requests.find((item) => item.id === requestId);
     if (!request || !profile) throw new Error('Request not found.');
-    if (isDemo || !supabase) {
+    if (isDemo) {
       const group = groups.find((item) => item.id === request.groupId);
       const now = new Date().toISOString();
       const decision: ApprovalDecision = {
@@ -347,7 +356,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
       setRequests((current) => current.map((item) => (item.id === requestId ? next : item)));
       return next.status;
     }
-    const status = await submitApprovalDecisionRemote(supabase, request, input);
+    const status = await submitApprovalDecisionRemote(approvalClient(), request, input);
     await Promise.all([refreshApprovals(), refreshChats()]);
     return status;
   }, [requests, groups, profile, isDemo, refreshApprovals, refreshChats]);
@@ -355,11 +364,11 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
   const cancelApprovalRequest = useCallback<ApprovalsContextValue['cancelApprovalRequest']>(async (requestId) => {
     const request = requests.find((item) => item.id === requestId);
     if (!request) return;
-    if (isDemo || !supabase) {
+    if (isDemo) {
       setRequests((current) => current.map((item) => (item.id === requestId ? { ...item, status: 'cancelled', awaitingMe: false } : item)));
       return;
     }
-    await cancelApprovalRequestRemote(supabase, request);
+    await cancelApprovalRequestRemote(approvalClient(), request);
     await Promise.all([refreshApprovals(), refreshChats()]);
   }, [requests, isDemo, refreshApprovals, refreshChats]);
 
@@ -369,6 +378,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
     groups,
     requests,
     loading,
+    error,
     pendingForMe,
     refreshApprovals,
     createApprovalGroup,
@@ -377,7 +387,7 @@ export function ApprovalsProvider({ children }: PropsWithChildren) {
     updateApprovalRequest,
     submitApprovalDecision,
     cancelApprovalRequest,
-  }), [groups, requests, loading, pendingForMe, refreshApprovals, createApprovalGroup, updateApprovalMembers, createApprovalRequest, updateApprovalRequest, submitApprovalDecision, cancelApprovalRequest]);
+  }), [groups, requests, loading, error, pendingForMe, refreshApprovals, createApprovalGroup, updateApprovalMembers, createApprovalRequest, updateApprovalRequest, submitApprovalDecision, cancelApprovalRequest]);
 
   return <ApprovalsContext.Provider value={value}>{children}</ApprovalsContext.Provider>;
 }

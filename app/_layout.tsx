@@ -2,13 +2,14 @@ import 'react-native-gesture-handler';
 import { useEffect } from 'react';
 import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Platform } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { CallOverlay } from '@/components/CallOverlay';
 import { TabActivityBadge } from '@/components/TabActivityBadge';
 import { AppProvider } from '@/context/AppContext';
 import { ApprovalsProvider } from '@/context/ApprovalsContext';
 import { colors } from '@/theme/colors';
+import { backendConfigurationError } from '@/lib/supabase';
 
 export default function RootLayout() {
   const router = useRouter();
@@ -35,6 +36,17 @@ export default function RootLayout() {
     }).catch(() => undefined);
     return () => { cancelled = true; subscription?.remove(); };
   }, [router]);
+
+  if (backendConfigurationError) {
+    return (
+      <View style={styles.configurationError}>
+        <StatusBar style="light" />
+        <Text style={styles.title}>Online messaging unavailable</Text>
+        <Text style={styles.detail}>{backendConfigurationError}</Text>
+        <Text style={styles.detail}>No messages have been sent. Ask the app publisher for a configured build.</Text>
+      </View>
+    );
+  }
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -71,3 +83,9 @@ export default function RootLayout() {
     </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  configurationError: { flex: 1, justifyContent: 'center', padding: 28, gap: 16, backgroundColor: colors.navy950 },
+  title: { color: colors.white, fontSize: 24, fontWeight: '700' },
+  detail: { color: colors.muted, fontSize: 16, lineHeight: 24 },
+});

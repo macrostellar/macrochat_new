@@ -71,7 +71,7 @@ export function MessageTimerBorder({ expiresAt, createdAt, radius = 16, strokeWi
   });
 
   return (
-    <View style={[StyleSheet.absoluteFillObject, { pointerEvents: 'none', overflow: 'hidden' }]} onLayout={onLayout}>
+    <View style={[StyleSheet.absoluteFill, { pointerEvents: 'none', overflow: 'hidden' }]} onLayout={onLayout}>
       {rectWidth > 0 && rectHeight > 0 && (
         <Svg width={size.width} height={size.height} style={{ overflow: 'visible' }}>
           <AnimatedRect

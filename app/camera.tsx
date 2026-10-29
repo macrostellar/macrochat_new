@@ -183,7 +183,7 @@ const styles = StyleSheet.create({
   camera: { flex: 1 },
   topBar: { marginTop: 54, marginHorizontal: 18, flexDirection: 'row', justifyContent: 'space-between' },
   topBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' },
-  filterOverlay: { ...StyleSheet.absoluteFillObject },
+  filterOverlay: { ...StyleSheet.absoluteFill },
   controls: { paddingBottom: 26, paddingTop: 10, backgroundColor: colors.black },
   filters: { paddingHorizontal: 14, gap: 8, marginBottom: 14 },
   filterChip: { height: 34, borderRadius: 17, paddingHorizontal: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)', justifyContent: 'center' },

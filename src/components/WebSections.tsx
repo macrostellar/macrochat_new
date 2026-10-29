@@ -516,7 +516,7 @@ type ApprovalsPane =
   | { mode: 'new-group' };
 
 export function WebApprovals({ initialRequestId, initialGroupId, initialMode }: { initialRequestId?: string; initialGroupId?: string; initialMode?: 'new' | 'new-group' | 'group' | 'edit' }) {
-  const { loading, requests } = useApprovals();
+  const { loading, requests, error, refreshApprovals } = useApprovals();
   const [tab, setTab] = useState<ApprovalTab>(initialMode === 'group' ? 'groups' : 'inbox');
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<HistoryFilters>(defaultHistoryFilters);
@@ -549,6 +549,7 @@ export function WebApprovals({ initialRequestId, initialGroupId, initialMode }: 
       )}
       sidebar={(
         <>
+          {error && <Pressable onPress={() => void refreshApprovals()} accessibilityRole="button"><Text style={styles.emptyList}>Approvals could not be loaded: {error} Click to retry.</Text></Pressable>}
           <ApprovalTabs tab={tab} onChange={setTab} />
           <Search value={query} onChangeText={setQuery} placeholder={tab === 'groups' ? 'Search groups' : tab === 'history' ? 'Search old approvals' : 'Search requests'} />
           {tab === 'history' && <View style={{ marginTop: 8 }}><HistoryFilterBar filters={filters} onChange={setFilters} /></View>}

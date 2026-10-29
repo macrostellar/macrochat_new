@@ -149,8 +149,8 @@ function NativeField() {
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(drift, { toValue: 1, duration: 9000, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
-        Animated.timing(drift, { toValue: 0, duration: 9000, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
+        Animated.timing(drift, { toValue: 1, duration: 9000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(drift, { toValue: 0, duration: 9000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ]),
     );
     loop.start();
@@ -189,7 +189,7 @@ export function AmbientQuantumField() {
 }
 
 const styles = StyleSheet.create({
-  nativeRoot: { ...StyleSheet.absoluteFillObject, zIndex: 0, overflow: 'hidden', pointerEvents: 'none' },
+  nativeRoot: { ...StyleSheet.absoluteFill, zIndex: 0, overflow: 'hidden', pointerEvents: 'none' },
   blob: { position: 'absolute', width: 420, height: 420, borderRadius: 210, filter: 'blur(60px)' },
   blobA: { top: -80, left: -90, backgroundColor: 'rgba(72, 122, 255, 0.22)' },
   blobB: { top: 200, right: -110, backgroundColor: 'rgba(44, 96, 178, 0.18)' },

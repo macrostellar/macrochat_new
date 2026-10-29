@@ -36,7 +36,8 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
 
   const secret = Deno.env.get('PUSH_WEBHOOK_SECRET');
-  if (secret && req.headers.get('x-webhook-secret') !== secret) {
+  if (!secret) return json({ error: 'Push webhook secret is not configured' }, 503);
+  if (req.headers.get('x-webhook-secret') !== secret) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
@@ -51,20 +52,33 @@ Deno.serve(async (req) => {
   } catch {
     return json({ error: 'Invalid JSON' }, 400);
   }
-  if (!record?.conversation_id || !record.sender_id) {
+  if (!record?.id) {
     return json({ error: 'Missing record fields' }, 400);
   }
 
-  const { data: members } = await supabase
+  const saved = await supabase.from('macrochat_messages')
+    .select('id,conversation_id,sender_id,kind').eq('id', record.id).maybeSingle();
+  if (saved.error) {
+    console.error('Push message lookup failed:', saved.error);
+    return json({ error: 'Message lookup failed' }, 500);
+  }
+  if (!saved.data) return json({ error: 'Message not found' }, 404);
+  record = saved.data as MessageRow;
+  const message = record;
+  const { data: members, error: membersError } = await supabase
     .from('macrochat_conversation_members')
     .select('user_id')
     .eq('conversation_id', record.conversation_id)
     .neq('user_id', record.sender_id);
+  if (membersError) {
+    console.error('Push membership lookup failed:', membersError);
+    return json({ error: 'Membership lookup failed' }, 500);
+  }
 
   const recipientIds = (members ?? []).map((m) => m.user_id as string);
   if (recipientIds.length === 0) return json({ sent: 0 });
 
-  const [{ data: prefsRows }, { data: tokenRows }, { data: sender }] = await Promise.all([
+  const [prefsResult, tokensResult, senderResult] = await Promise.all([
     supabase
       .from('notification_preferences')
       .select('user_id, messages, sound, badge, preview')
@@ -76,6 +90,25 @@ Deno.serve(async (req) => {
       .eq('id', record.sender_id)
       .maybeSingle(),
   ]);
+  const lookupError = prefsResult.error || tokensResult.error || senderResult.error;
+  if (lookupError) {
+    console.error('Push recipient lookup failed:', lookupError);
+    return json({ error: 'Recipient lookup failed' }, 500);
+  }
+  const prefsRows = prefsResult.data;
+  const tokenRows = tokensResult.data;
+  const sender = senderResult.data;
+
+  const badges = new Map<string, number>();
+  const counts = await Promise.all(recipientIds.map(async (userId) => {
+    const result = await supabase.rpc('macrochat_unread_message_count', { target_user_id: userId });
+    if (result.error) throw new Error(result.error.message);
+    badges.set(userId, result.data as number);
+  })).then(() => null, (error: Error) => error);
+  if (counts) {
+    console.error('Push unread count failed:', counts);
+    return json({ error: 'Unread count lookup failed' }, 500);
+  }
 
   const prefsByUser = new Map((prefsRows ?? []).map((row) => [row.user_id as string, row]));
   const senderName = (sender?.display_name as string | undefined) ?? 'MacroChat';
@@ -102,40 +135,55 @@ Deno.serve(async (req) => {
       sound: prefs?.sound === false ? null : 'default',
       priority: 'high',
       channelId: prefs?.sound === false ? 'messages_silent' : 'messages_push',
-      badge: prefs?.badge === false ? undefined : 1,
-      data: { conversationId: record.conversation_id, messageId: record.id },
+      badge: prefs?.badge === false ? 0 : badges.get(userId) ?? 0,
+      data: { conversationId: message.conversation_id, messageId: message.id },
     });
   }
 
   if (messages.length === 0) return json({ sent: 0 });
 
-  const receipts: unknown[] = [];
+  const dead: string[] = [];
+  let accepted = 0;
+  let rejected = 0;
   for (let i = 0; i < messages.length; i += 100) {
+    const batch = messages.slice(i, i + 100);
     const res = await fetch(EXPO_PUSH_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Accept-Encoding': 'gzip, deflate',
       },
-      body: JSON.stringify(messages.slice(i, i + 100)),
+      body: JSON.stringify(batch),
     });
-    receipts.push(await res.json().catch(() => null));
-  }
-
-  // Drop tokens Expo reports as permanently unregistered.
-  const dead: string[] = [];
-  for (const receipt of receipts) {
-    const tickets = (receipt as { data?: { status: string; details?: { error?: string } }[] })?.data;
-    tickets?.forEach((ticket, index) => {
+    if (!res.ok) {
+      console.error('Expo push gateway failed:', res.status);
+      return json({ error: 'Push gateway rejected the request' }, 502);
+    }
+    const receipt = await res.json() as { data?: { status: string; id?: string; details?: { error?: string } }[] };
+    if (!Array.isArray(receipt.data) || receipt.data.length !== batch.length) {
+      return json({ error: 'Invalid push gateway response' }, 502);
+    }
+    receipt.data.forEach((ticket, index) => {
+      if (ticket.status === 'ok') {
+        accepted += 1;
+        console.log('Expo push ticket accepted:', ticket.id);
+      }
+      else {
+        rejected += 1;
+        console.error('Expo push ticket rejected:', ticket.details?.error ?? 'Unknown error');
+      }
       if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
-        const message = messages[index];
-        if (message) dead.push(message.to);
+        dead.push(batch[index].to);
       }
     });
   }
   if (dead.length > 0) {
-    await supabase.from('user_push_tokens').delete().in('token', dead);
+    const { error } = await supabase.from('user_push_tokens').delete().in('token', dead);
+    if (error) {
+      console.error('Push token cleanup failed:', error);
+      return json({ error: 'Push token cleanup failed' }, 500);
+    }
   }
 
-  return json({ sent: messages.length, removed: dead.length });
+  return json({ accepted, rejected, removed: dead.length }, rejected ? 502 : 200);
 });

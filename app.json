@@ -2,7 +2,7 @@
   "expo": {
     "name": "MacroChat",
     "slug": "macrochat",
-    "version": "1.0.0",
+    "version": "4.0.1",
     "icon": "./assets/images/macrostellar-logo.png",
     "orientation": "portrait",
     "scheme": "macrochat",
@@ -10,11 +10,11 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.rpp.macrochat.app",
-      "buildNumber": "2"
+      "buildNumber": "5"
     },
     "android": {
       "package": "com.rpp.macrochat",
-      "versionCode": 1,
+      "versionCode": 19,
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#07111F"

@@ -1,10 +1,23 @@
 # MacroChat Production Deployment Guide
 
+## Android app bundle
+
+The next Android update is version `4.0.1`, versionCode `18` (after uploaded
+versionCode `17`). Keep `app.json` and `android/app/build.gradle` aligned.
+Local release builds require `MACROCHAT_UPLOAD_STORE_FILE`,
+`MACROCHAT_UPLOAD_STORE_PASSWORD`, `MACROCHAT_UPLOAD_KEY_ALIAS`, and
+`MACROCHAT_UPLOAD_KEY_PASSWORD` in the build environment. Use the existing
+registered upload keystore; release builds no longer use the debug key.
+Keep keystores and passwords outside the repository. With the Android SDK and
+production Supabase environment configured, run `./gradlew :app:bundleRelease`
+from `android/`. The bundle is generated at
+`android/app/build/outputs/bundle/release/app-release.aab`.
+
 ## iOS / TestFlight
 
 The existing App Store app uses `com.rpp.macrochat.app`. Keep the Expo iOS
 bundle identifier and both native target configurations aligned. The next local
-upload is version `1.0.0`, build `2`; increase the build number for later uploads.
+upload is version `1.0.0`, build `4`; increase the build number for later uploads.
 The native Info.plist reads the build number from `CURRENT_PROJECT_VERSION`.
 
 From a fully downloaded local checkout:
@@ -21,6 +34,89 @@ not automatically load the production environment in `eas.json`. Do not commit
 local environment files. Confirm the signing team matches the existing app,
 select Any iOS Device, and use Product > Archive > Distribute App > App Store
 Connect. Select the processed upload in TestFlight.
+
+### Required messaging configuration
+
+1. Copy `.env.example` to `.env` in the project root.
+2. Open the **same Supabase project used by the working web app**. In the
+   Connect dialog / Project Settings > API, copy the Project URL to
+   `EXPO_PUBLIC_SUPABASE_URL` and its publishable key (or legacy **anon** key) to
+   `EXPO_PUBLIC_SUPABASE_ANON_KEY`. Never use a secret or service-role key.
+   The deployed web host's environment settings are another source for these
+   existing values.
+3. Copy the working production signaling URL to `EXPO_PUBLIC_SIGNALING_URL`
+   for calls. TURN settings must also match the working deployment.
+4. Release builds now reject missing or malformed Supabase settings, including
+   masked placeholder keys. Confirm the URL and key belong to the same project;
+   validation cannot verify connectivity or the live database schema.
+5. To preview sample chats/approvals locally, leave both Supabase values blank
+   and explicitly set `EXPO_PUBLIC_DEMO_MODE=true`. This is development-only.
+   Demo identities use separate storage and are not real, recoverable accounts.
+
+Online startup verifies the account profile in Supabase before publishing
+encryption keys. A newly authenticated user must finish profile registration
+first; authentication alone does not create a MacroChat profile.
+
+The previous unconfigured build generated local-only Macro IDs and marked local
+messages sent without contacting a server. Those IDs/messages were not uploaded
+and cannot be delivered retroactively. After installing the configured build,
+create a real online identity (or recover an existing online account), exchange
+the new IDs, and resend the messages.
+
+Before sharing the next build, test two independent online accounts on two
+devices: verify each display name, send a new Macro ID chat both ways, restart
+both apps and confirm history, resume after backgrounding, test media and an
+approval group/request/decision, and test against the web app. Only mark a send
+successful after a server confirmation. A successful archive/upload alone does
+not establish message delivery or feature parity.
+
+### iOS delivery and background notifications
+
+The mobile reliability update isolates draft typing from the message list,
+uses native-driven ambient animation, avoids rebuilding chat state when nothing
+expires, refreshes read receipts while a conversation is focused, and polls
+messages/receipts every three seconds while active as a realtime fallback.
+Reconnection also reloads history. This does not guarantee a network delivery
+time; measure on physical devices before releasing.
+
+New media must upload successfully to private storage before sending. Device-local
+paths and failed uploads are never saved as delivered attachments. Signed URLs
+are refreshed from storage paths (every four minutes while active and on resume).
+Old attachments saved as another device's local file cannot be recovered by
+changing the receiver; the sender must resend them.
+
+For locked-screen notifications, complete all of these steps:
+
+1. Run `notification-preferences-migration.sql`, `push-notifications-migration.sql`,
+   and `mobile-delivery-migration.sql` in the Supabase SQL Editor.
+2. Set `PUSH_WEBHOOK_SECRET` in Edge Function secrets. In Supabase Vault create
+   `macrochat_push_webhook_secret` with the exact same value and
+   `macrochat_push_function_url` with the project's `/functions/v1/send-push` URL.
+   Never place this secret in `.env`, `EXPO_PUBLIC_*`, or committed SQL.
+3. Deploy `supabase functions deploy send-push --project-ref pofbkteiymgiwciamyll --no-verify-jwt`.
+   The endpoint authenticates database requests with the webhook secret instead
+   of a user JWT. It rejects missing configuration and verifies the saved message.
+4. In Apple Developer, enable **Push Notifications** for `com.rpp.macrochat.app`.
+   Regenerate/download the App Store provisioning profile after enabling it.
+   The Release target's `APS_ENVIRONMENT` must be `production`; Debug uses
+   `development`. Existing archives without the entitlement cannot receive APNs.
+5. Run `eas credentials --platform ios` for this Expo project and configure a valid
+   Apple Push Notifications key for the same signing team and bundle identifier.
+   Keep Apple keys private and do not commit them.
+6. Archive/upload a new iOS build, launch it on a physical iPhone, sign in, and
+   allow notifications. Confirm `user_push_tokens` has an iOS token for that
+   account. Registration errors are now shown rather than silently ignored.
+7. Lock/background the phone and send from another account. Check Edge Function
+   logs and Expo push **receipts** using the logged ticket IDs; accepted tickets
+   alone do not prove APNs delivery. Check iOS Settings > Notifications > MacroChat
+   for allowed Lock Screen alerts and Badges, and disable Focus for the test.
+8. Read all chats and confirm the icon badge returns to zero. Test read receipts
+   with both accounts' read-receipt settings enabled.
+
+Notifications contain sender metadata and a generic message/attachment label,
+not decrypted message text. Remote push alerts work independently of the app's
+foreground realtime connection; iOS is not expected to keep a background socket
+alive. Do not expect background JavaScript execution after force-quitting.
 
 ## Overview
 Deploy **Signaling Server** (for WebRTC calls) + **TURN Server** (for NAT traversal) + update the **app** to use production URLs.

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react';
+import { Alert, AppState, FlatList, Image, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
@@ -127,22 +127,91 @@ function expiryLabel(expiresAt: string) {
   return `${Math.ceil(remaining / 86400000)}d`;
 }
 
+type ComposerHandle = { append: (value: string) => void; focus: () => void };
+
+function ConversationComposer({ ref, bottom, panel, recording, emojiOpen, onAttachment, onEmoji, onSend, onVoice, onActivity }: {
+  ref: Ref<ComposerHandle>;
+  bottom: number;
+  panel: string;
+  recording: boolean;
+  emojiOpen: boolean;
+  onAttachment: () => void;
+  onEmoji: () => void;
+  onSend: (text: string) => void;
+  onVoice: () => void;
+  onActivity: (state: 'typing' | null) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const [focused, setFocused] = useState(false);
+  const input = useRef<TextInput>(null);
+  const lastActivity = useRef(0);
+  const activity = useRef(onActivity);
+  useEffect(() => { activity.current = onActivity; }, [onActivity]);
+  useImperativeHandle(ref, () => ({
+    append: (value) => setDraft((current) => current + value),
+    focus: () => input.current?.focus(),
+  }), []);
+  useEffect(() => {
+    if (!draft.trim()) {
+      activity.current(null);
+      return;
+    }
+    if (Date.now() - lastActivity.current >= 1000) {
+      activity.current('typing');
+      lastActivity.current = Date.now();
+    }
+    const timer = setTimeout(() => activity.current(null), 1800);
+    return () => clearTimeout(timer);
+  }, [draft]);
+  useEffect(() => () => activity.current(null), []);
+  const submit = () => {
+    if (!draft.trim()) return;
+    onSend(draft.trim());
+    setDraft('');
+  };
+  return (
+    <View style={[styles.composer, { paddingBottom: Math.max(bottom, 10), backgroundColor: panel }]}>
+      <Pressable style={styles.composeButton} onPress={onAttachment}><Ionicons name="add" size={24} color={colors.blue} /></Pressable>
+      <View style={[styles.inputWrap, focused && styles.inputWrapFocus]}>
+        <TextInput
+          ref={input}
+          value={draft}
+          onChangeText={setDraft}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder="Message"
+          placeholderTextColor={colors.muted}
+          style={[styles.input, Platform.OS === 'web' ? { outlineWidth: 0 } : null]}
+          multiline
+          maxLength={4000}
+          onKeyPress={Platform.OS === 'web' ? (event) => {
+            if (event.nativeEvent.key === 'Enter' && !('shiftKey' in event.nativeEvent && event.nativeEvent.shiftKey)) {
+              event.preventDefault();
+              submit();
+            }
+          } : undefined}
+        />
+        <Pressable style={styles.emojiToggle} hitSlop={8} accessibilityLabel="Emoji" onPress={onEmoji}><Ionicons name="happy-outline" size={22} color={emojiOpen ? colors.neon : colors.muted} /></Pressable>
+      </View>
+      <Pressable style={[styles.send, recording && styles.sendRecording]} onPress={draft.trim() ? submit : onVoice}><Ionicons name={draft.trim() ? 'send' : (recording ? 'stop' : 'mic')} size={21} color={colors.navy950} /></Pressable>
+    </View>
+  );
+}
+
 export default function ConversationScreen() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string | string[] }>();
   const chatId = Array.isArray(id) ? id[0] : id;
-  const { profile, loading, chats, activityByChat, sendMessage, sendMediaMessage, sendChatActivity, logChatSystemMessage, markRead, refreshChats, loadOlderMessages, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall, pinChat, muteChat, clearChat, blockContact, deleteMessage, editMessage, setChatDisappearingTimer, postMessageReaction, messageReactions, appearanceSettings, toggleMessagePin, toggleMessageStar } = useApp();
+  const { profile, loading, chats, activityByChat, setActiveChatId, sendMessage, sendMediaMessage, sendChatActivity, logChatSystemMessage, markRead, refreshChats, loadOlderMessages, e2eeEnabled, e2eePro, signalingEnabled, signalingReady, activeCall, startAudioCall, startVideoCall, acceptIncomingCall, rejectIncomingCall, endActiveCall, pinChat, muteChat, clearChat, blockContact, deleteMessage, editMessage, setChatDisappearingTimer, postMessageReaction, messageReactions, appearanceSettings, toggleMessagePin, toggleMessageStar } = useApp();
   const chat = chats.find((item) => item.id === chatId);
   const e2eeActive = e2eeEnabled || Boolean(e2eePro);
   const showDeviceStatus = Boolean(chat?.peerDevice);
 
-  const [text, setText] = useState('');
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [reply, setReply] = useState<Message | null>(null);
   const [resolvingMissing, setResolvingMissing] = useState(false);
   const [autoResolveAttempted, setAutoResolveAttempted] = useState(false);
-  const [inputFocused, setInputFocused] = useState(false);
   const [attachmentPanelOpen, setAttachmentPanelOpen] = useState(false);
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [recording, setRecording] = useState(false);
@@ -162,6 +231,7 @@ export default function ConversationScreen() {
   const [videoDurations, setVideoDurations] = useState<Record<string, number>>({});
   const [replyJumpTargetId, setReplyJumpTargetId] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [failedMedia, setFailedMedia] = useState<Record<string, boolean>>({});
 
   const handleLoadOlder = async () => {
     if (!chat || loadingOlder) return;
@@ -174,7 +244,7 @@ export default function ConversationScreen() {
   };
 
   const list = useRef<FlatList<Message>>(null);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<ComposerHandle>(null);
   const swipeableRefs = useRef<Record<string, any>>({});
   const pendingSendScroll = useRef(false);
   const voiceSound = useRef<AudioPlayer | null>(null);
@@ -204,6 +274,15 @@ export default function ConversationScreen() {
 
   const remoteActivity = chat ? activityByChat[chat.id] : undefined;
   const activityChatId = chat?.id;
+  const warmPeerUserId = chat?.participantUserId;
+  useEffect(() => {
+    if (e2eePro && warmPeerUserId) void e2eePro.warmPeer(warmPeerUserId);
+  }, [e2eePro, warmPeerUserId]);
+  useEffect(() => {
+    if (!activityChatId) return;
+    setActiveChatId(activityChatId);
+    return () => setActiveChatId(null);
+  }, [activityChatId, setActiveChatId]);
   const [manualActivityState, setManualActivityState] = useState<'recording' | 'screenshot' | null>(null);
   const textSizeMap = { compact: 14, comfortable: 15, large: 16, xl: 17 } as const;
   const wallpaperMap = {
@@ -258,9 +337,18 @@ export default function ConversationScreen() {
     return () => clearTimeout(timeout);
   }, [replyJumpTargetId]);
 
-  useEffect(() => {
-    if (chatId) markRead(chatId);
-  }, [chatId, markRead]);
+  const unread = chat?.unread ?? 0;
+  useFocusEffect(useCallback(() => {
+    if (!chatId) return;
+    const read = () => {
+      if (AppState.currentState === 'active') markRead(chatId);
+    };
+    read();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') read();
+    });
+    return () => subscription.remove();
+  }, [chatId, unread, markRead]));
 
   useEffect(() => {
     setAutoResolveAttempted(false);
@@ -320,20 +408,7 @@ export default function ConversationScreen() {
       };
     }
 
-    if (!text.trim()) {
-      sendChatActivity(activityChatId, null);
-      return;
-    }
-
-    sendChatActivity(activityChatId, 'typing');
-    const timeoutHandle = setTimeout(() => {
-      sendChatActivity(activityChatId, null);
-    }, 1600);
-
-    return () => {
-      clearTimeout(timeoutHandle);
-    };
-  }, [activityChatId, manualActivityState, recording, webRecording, text, sendChatActivity, width]);
+  }, [activityChatId, manualActivityState, recording, webRecording, sendChatActivity, width]);
 
   if (Platform.OS === 'web' && width >= 820) {
     return <WebMessenger initialChatId={chatId} />;
@@ -643,13 +718,11 @@ export default function ConversationScreen() {
     }
   };
 
-  const send = () => {
-    const payload = text.trim();
+  const send = (payload: string) => {
     if (!payload) return;
     const replyId = reply?.id;
     pendingSendScroll.current = true;
     sendMessage(chat.id, payload, replyId);
-    setText('');
     if (replyId) {
       resetReplySwipe(replyId);
     }
@@ -667,11 +740,6 @@ export default function ConversationScreen() {
   };
 
   const onPrimaryAction = () => {
-    if (text.trim()) {
-      send();
-      return;
-    }
-
     if (recording || webRecording) {
       stopVoiceNote().catch(() => Alert.alert('Voice note failed', 'Unable to stop recording.'));
       return;
@@ -866,10 +934,10 @@ export default function ConversationScreen() {
             item.mimeType?.startsWith('image/') ||
             item.fileName?.match(/\.(png|jpg|jpeg|gif|webp|bmp|svg)$/i)
           ));
-          const voicePayload = item.kind === 'voice' && item.mediaUrl ? { uri: item.mediaUrl, durationMs: item.durationMs || 0 } : null;
-          const imagePayload = isImage && item.mediaUrl ? { uri: item.mediaUrl, name: item.fileName || 'Image' } : null;
-          const videoPayload = isVideo && item.mediaUrl ? { uri: item.mediaUrl, name: item.fileName || 'Video' } : null;
-          const filePayload = !isImage && !isVideo && item.kind === 'file' ? { name: item.fileName || item.text } : null;
+          const voicePayload = !failedMedia[item.id] && item.kind === 'voice' && item.mediaUrl ? { uri: item.mediaUrl, durationMs: item.durationMs || 0 } : null;
+          const imagePayload = !failedMedia[item.id] && isImage && item.mediaUrl ? { uri: item.mediaUrl, name: item.fileName || 'Image' } : null;
+          const videoPayload = !failedMedia[item.id] && isVideo && item.mediaUrl ? { uri: item.mediaUrl, name: item.fileName || 'Video' } : null;
+          const filePayload = !isImage && !isVideo && item.kind === 'file' && item.mediaUrl ? { name: item.fileName || item.text, uri: item.mediaUrl } : null;
           const isPlaying = activeVoiceId === item.id;
           const playbackDuration = voicePayload ? Math.max(activeVoiceProgress.duration || voicePayload.durationMs || 1, 1) : 1;
           const playbackPosition = voicePayload && isPlaying ? activeVoiceProgress.position : 0;
@@ -909,7 +977,10 @@ export default function ConversationScreen() {
                 )}
                 {voicePayload ? (
                   <View style={styles.voiceNoteWrap}>
-                    <Pressable style={styles.voicePlayBtn} onPress={() => toggleVoicePlayback(item.id, voicePayload).catch(() => undefined)}>
+                    <Pressable style={styles.voicePlayBtn} onPress={() => toggleVoicePlayback(item.id, voicePayload).catch((error) => {
+                      setFailedMedia((current) => ({ ...current, [item.id]: true }));
+                      Alert.alert('Voice note unavailable', error instanceof Error ? error.message : 'Refresh the attachment and try again.');
+                    })}>
                       <Ionicons name={isPlaying ? 'pause' : 'play'} color={colors.navy950} size={16} />
                     </Pressable>
                     <View style={styles.voiceTrack}>
@@ -919,7 +990,7 @@ export default function ConversationScreen() {
                   </View>
                 ) : imagePayload ? (
                   <Pressable style={isSticker ? undefined : styles.mediaFrame} onPress={() => setPreview({ uri: imagePayload.uri, kind: 'image', fileName: imagePayload.name })}>
-                    <Image source={{ uri: imagePayload.uri }} style={isSticker ? { width: 132, height: 132, backgroundColor: 'transparent' } : styles.imageBubble} resizeMode={isSticker ? 'contain' : 'cover'} />
+                    <Image source={{ uri: imagePayload.uri }} onError={() => setFailedMedia((current) => ({ ...current, [item.id]: true }))} style={isSticker ? { width: 132, height: 132, backgroundColor: 'transparent' } : styles.imageBubble} resizeMode={isSticker ? 'contain' : 'cover'} />
                   </Pressable>
                 ) : videoPayload ? (
                   <Pressable style={styles.mediaFrame} onPress={() => setPreview({ uri: videoPayload.uri, kind: 'video', fileName: videoPayload.name, ratio: videoRatios[item.id] })}>
@@ -940,10 +1011,20 @@ export default function ConversationScreen() {
                     </View>
                   </Pressable>
                 ) : filePayload ? (
-                  <View style={styles.attachWrap}>
+                  <Pressable style={styles.attachWrap} onPress={() => {
+                    void Linking.openURL(filePayload.uri).catch((error) => Alert.alert('File could not be opened', String(error)));
+                  }}>
                     <Ionicons name="document-outline" color={colors.blue} size={18} />
                     <Text style={styles.attachText} numberOfLines={1}>{filePayload.name}</Text>
-                  </View>
+                  </Pressable>
+                ) : item.kind === 'voice' || item.kind === 'image' || item.kind === 'video' || item.kind === 'file' ? (
+                  <Pressable onPress={() => {
+                    void refreshChats().then(() => setFailedMedia((current) => ({ ...current, [item.id]: false })))
+                      .catch((error) => Alert.alert('Attachment could not be refreshed', String(error)));
+                  }}>
+                    <Text style={styles.attachText}>{item.fileName || item.kind}</Text>
+                    <Text style={styles.time}>Attachment unavailable. Tap to refresh.</Text>
+                  </Pressable>
                 ) : (
                   <Text
                     style={[
@@ -1314,7 +1395,7 @@ export default function ConversationScreen() {
             <Text style={styles.emojiPanelTitle}>Emoji</Text>
             <View style={styles.emojiPanelInner}>
               {EMOJI_PANEL.map((emoji) => (
-                <Pressable key={emoji} style={styles.emojiPanelBtn} onPress={() => setText((prev) => prev + emoji)}>
+                <Pressable key={emoji} style={styles.emojiPanelBtn} onPress={() => inputRef.current?.append(emoji)}>
                   <Text style={styles.emojiPanelText}>{emoji}</Text>
                 </Pressable>
               ))}
@@ -1331,31 +1412,18 @@ export default function ConversationScreen() {
         </View>
       )}
 
-      <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 10), backgroundColor: wall.panel }]}>
-        <Pressable style={styles.composeButton} onPress={openAttachmentMenu}><Ionicons name="add" size={24} color={colors.blue} /></Pressable>
-        <View style={[styles.inputWrap, inputFocused && styles.inputWrapFocus]}>
-          <TextInput
-            ref={inputRef}
-            value={text}
-            onChangeText={setText}
-            onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
-            placeholder="Message"
-            placeholderTextColor={colors.muted}
-            style={[styles.input, Platform.OS === 'web' ? ({ outlineStyle: 'none', outlineWidth: 0 } as any) : null]}
-            multiline
-            maxLength={4000}
-            onKeyPress={Platform.OS === 'web' ? (event: any) => {
-              if (event?.nativeEvent?.key === 'Enter' && !event?.nativeEvent?.shiftKey) {
-                event.preventDefault?.();
-                send();
-              }
-            } : undefined}
-          />
-          <Pressable style={styles.emojiToggle} hitSlop={8} accessibilityLabel="Emoji" onPress={() => setEmojiOpen((current) => { if (!current) setAttachmentPanelOpen(false); return !current; })}><Ionicons name="happy-outline" size={22} color={emojiOpen ? colors.neon : colors.muted} /></Pressable>
-        </View>
-        <Pressable style={[styles.send, recording && styles.sendRecording]} onPress={onPrimaryAction}><Ionicons name={text.trim() ? 'send' : (recording ? 'stop' : 'mic')} size={21} color={colors.navy950} /></Pressable>
-      </View>
+      <ConversationComposer
+        ref={inputRef}
+        bottom={insets.bottom}
+        panel={wall.panel}
+        recording={recording || webRecording}
+        emojiOpen={emojiOpen}
+        onAttachment={openAttachmentMenu}
+        onEmoji={() => setEmojiOpen((current) => { if (!current) setAttachmentPanelOpen(false); return !current; })}
+        onSend={send}
+        onVoice={onPrimaryAction}
+        onActivity={(state) => { if (activityChatId) sendChatActivity(activityChatId, state); }}
+      />
     </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -1405,7 +1473,7 @@ const styles = StyleSheet.create({
   imageBubble: { width: '100%', aspectRatio: 4 / 3, borderRadius: 12, backgroundColor: colors.navy700 },
   mediaFrame: { width: 244, maxWidth: '100%', marginHorizontal: -5, marginTop: 1, marginBottom: 2 },
   videoThumb: { width: '100%', maxHeight: 340, borderRadius: 12, overflow: 'hidden', backgroundColor: '#050D16', alignItems: 'center', justifyContent: 'center' },
-  videoScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(3, 11, 20, 0.18)' },
+  videoScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(3, 11, 20, 0.18)' },
   videoPlayBadge: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(109, 245, 194, 0.95)', alignItems: 'center', justifyContent: 'center' },
   videoDurationPill: { position: 'absolute', left: 8, bottom: 8, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, backgroundColor: 'rgba(3, 11, 20, 0.66)' },
   videoDurationText: { color: colors.white, fontSize: 11, fontWeight: '700' },

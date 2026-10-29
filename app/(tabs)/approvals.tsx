@@ -11,7 +11,7 @@ import type { ApprovalDecisionKind, ApprovalRequest } from '@/types';
 
 export default function ApprovalsScreen() {
   const { width } = useWindowDimensions();
-  const { requests, groups, loading } = useApprovals();
+  const { requests, groups, loading, error, refreshApprovals } = useApprovals();
   const [tab, setTab] = useState<ApprovalTab>('inbox');
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<HistoryFilters>(defaultHistoryFilters);
@@ -41,6 +41,7 @@ export default function ApprovalsScreen() {
         </View>
       </View>
       <Text style={styles.caption}>Tap once to approve or reject — no typing needed.</Text>
+      {error && <Pressable onPress={() => void refreshApprovals()} accessibilityRole="button"><Text style={styles.empty}>Approvals could not be loaded: {error} Tap to retry.</Text></Pressable>}
 
       <ApprovalTabs tab={tab} onChange={setTab} />
       <View style={styles.search}><Ionicons name="search" size={18} color={colors.muted} /><TextInput value={query} onChangeText={setQuery} placeholder={tab === 'groups' ? 'Search groups' : tab === 'history' ? 'Search old approvals' : 'Search requests'} placeholderTextColor={colors.muted} style={styles.searchInput} /></View>
@@ -72,7 +73,7 @@ export default function ApprovalsScreen() {
         />
       )}
 
-      {requests.length === 0 && groups.length === 0 && !loading && tab === 'inbox' && (
+      {requests.length === 0 && groups.length === 0 && !loading && !error && tab === 'inbox' && (
         <Pressable style={styles.cta} onPress={() => router.push('/approvals/new-group')}><Ionicons name="shield-checkmark" size={18} color={colors.navy950} /><Text style={styles.ctaText}>Create your first approval group</Text></Pressable>
       )}
 
